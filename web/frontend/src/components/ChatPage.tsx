@@ -2,9 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import MessageBubble from './MessageBubble';
 import QuestionCards from './QuestionCards';
 import BrushEntry from './BrushEntry';
+import ChatAgentControls from './ChatAgentControls';
 import type { ChatSession, ChatMessage, StreamState } from '../lib/store';
 import { uploadFiles, adoptOversize } from '../lib/api';
-import type { UploadedFile } from '../lib/api';
+import type { UploadedFile, AgentSelection } from '../lib/api';
 import { IconArrowUp, IconStop, IconPlus, IconFile } from './icons';
 
 interface ChatPageProps {
@@ -12,6 +13,7 @@ interface ChatPageProps {
   stream?: StreamState;          // 进行中的流式态（来自 App，切页也不丢）
   onSend: (displayText: string, attachments?: UploadedFile[]) => void;
   onStop: () => void;
+  onAgentSelection: (selection: AgentSelection, switchAgent: boolean, draft: { text: string; attachments: UploadedFile[] }) => void;
   onResend: (
     userIndex: number,
     displayText: string,
@@ -35,9 +37,9 @@ function greeting(): string {
   return `${g}，想创作点什么？`;
 }
 
-export default function ChatPage({ session, stream, onSend, onStop, onResend, onQuestionAnswered }: ChatPageProps) {
-  const [input, setInput] = useState('');
-  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
+export default function ChatPage({ session, stream, onSend, onStop, onResend, onQuestionAnswered, onAgentSelection }: ChatPageProps) {
+  const [input, setInput] = useState(session.draft?.text || '');
+  const [attachments, setAttachments] = useState<UploadedFile[]>(session.draft?.attachments || []);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [maxMb, setMaxMb] = useState(50);
@@ -106,7 +108,7 @@ export default function ChatPage({ session, stream, onSend, onStop, onResend, on
 
   const handleSend = () => {
     const trimmed = input.trim();
-    if ((!trimmed && attachments.length === 0) || isStreaming || uploading) return;
+    if ((!trimmed && attachments.length === 0) || isStreaming || uploading || !session.agentSelection) return;
     // 附件通过结构化字段发送；用户消息气泡只显示用户实际输入的文字。
     onSend(trimmed, attachments);
     setInput('');
@@ -125,6 +127,9 @@ export default function ChatPage({ session, stream, onSend, onStop, onResend, on
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
       onDrop={onDrop}>
+      <ChatAgentControls sessionId={session.id} value={session.agentSelection} disabled={isStreaming}
+        hasMessages={session.messages.length > 0} onChange={(selection, switchAgent = false) =>
+          onAgentSelection(selection, switchAgent, { text: input, attachments })} />
       {attachments.length > 0 && (
         <div className="composer-attachments">
           {attachments.map((a) => (
@@ -160,7 +165,7 @@ export default function ChatPage({ session, stream, onSend, onStop, onResend, on
         {isStreaming ? (
           <button className="send-btn" onClick={onStop} title="停止生成"><IconStop size={15} /></button>
         ) : (
-          <button className="send-btn" onClick={handleSend} disabled={(!input.trim() && !attachments.length) || uploading} title="发送"><IconArrowUp size={17} /></button>
+          <button className="send-btn" onClick={handleSend} disabled={(!input.trim() && !attachments.length) || uploading || !session.agentSelection} title="发送"><IconArrowUp size={17} /></button>
         )}
       </div>
     </div>
@@ -181,7 +186,7 @@ export default function ChatPage({ session, stream, onSend, onStop, onResend, on
           <div className="suggestions">
             {SUGGESTIONS.map((s) => (
               <button key={s.title} className="card card-hover suggestion-card"
-                onClick={() => { if (!isStreaming) onSend(s.prompt); }}>
+                disabled={!session.agentSelection} onClick={() => { if (!isStreaming && session.agentSelection) onSend(s.prompt); }}>
                 <span className="suggestion-icon">{s.icon}</span>
                 <span className="suggestion-body">
                   <span className="suggestion-title">{s.title}</span>

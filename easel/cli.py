@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     p_agent = sub.add_parser("agent", help="选择或检测本地 Agent 后端")
     p_agent.add_argument("action", choices=["status", "use", "probe", "login"], nargs="?", default="status")
     p_agent.add_argument("backend", choices=["openclaw", "codex", "codebuddy"], nargs="?")
-    p_agent.add_argument("--model", help="模型名称；省略时沿用 CLI 默认模型")
+    p_agent.add_argument("--model", help="模型名称；省略时保留该 Agent 的默认配置")
     p_agent.set_defaults(func=cmd_agent)
 
     # doctor

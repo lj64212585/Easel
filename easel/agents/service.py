@@ -9,6 +9,7 @@ from .base import AgentError, AgentRequest
 from .codebuddy import CodeBuddyBackend
 from .codex import CodexBackend
 from .config import AgentConfig, BACKENDS, atomic_json
+from .options import select_model, select_effort
 
 FACTORIES = {"codex": CodexBackend, "codebuddy": CodeBuddyBackend}
 
@@ -18,6 +19,8 @@ class AgentService:
         self.config = AgentConfig(root)
         self.running = {}
         self.questions = {}
+        self.catalogs = {}
+        self.catalog_tasks = {}
 
     def backend_for(self, session_id: str | None = None) -> str:
         saved = self.config.session(session_id) if session_id else {}
@@ -29,6 +32,13 @@ class AgentService:
             if not self.config.session(session_id):
                 atomic_json(self.config.session_path(session_id), {"backend": backend})
 
+    def selection(self, session_id: str | None = None) -> dict:
+        saved = self.config.session(session_id) if session_id else {}
+        settings = self.config.settings()
+        backend = saved.get("backend") or settings["backend"]
+        return {"backend": backend, "model": saved.get("model", settings["models"].get(backend, "")),
+                "reasoningEffort": saved.get("reasoningEffort", settings["reasoningEfforts"].get(backend, ""))}
+
     def status(self) -> dict:
         settings = self.config.settings()
         rows = []
@@ -39,8 +49,39 @@ class AgentService:
             except AgentError:
                 command, installed = [], False
             rows.append({"id": key, "name": label, "installed": installed,
-                         "command": command, "model": settings["models"].get(key, "")})
+                         "command": command, "model": settings["models"].get(key, ""),
+                         "reasoningEffort": settings["reasoningEfforts"].get(key, "")})
         return {**settings, "backends": rows}
+
+    async def discover(self, backend: str, model: str = "", *, refresh=False) -> dict:
+        if backend not in BACKENDS:
+            raise AgentError("不支持的 Agent 后端")
+        if backend == "openclaw":
+            return {"backend": backend, "available": True, "models": [], "defaultModel": "",
+                    "selectedModel": "", "reasoningOptions": [], "defaultReasoningEffort": "",
+                    "detail": "OpenClaw 使用网关中的模型与思考配置"}
+        key = (backend, model)
+        cached = self.catalogs.get(key)
+        if not refresh and cached and time.monotonic() - cached[0] < (60 if cached[1]["available"] else 5):
+            return cached[1]
+        async def discover():
+            instance = FACTORIES[backend](self.config)
+            try:
+                data = await asyncio.wait_for(instance.discover(model), 50)
+                result = {**data, "backend": backend, "available": True, "detail": "选项来自本地 CLI"}
+            except (AgentError, asyncio.TimeoutError) as exc:
+                result = {"backend": backend, "available": False, "models": [], "defaultModel": "",
+                          "selectedModel": model, "reasoningOptions": [], "defaultReasoningEffort": "",
+                          "detail": str(exc) or "读取 CLI 模型列表超时"}
+            finally:
+                await instance.close()
+            self.catalogs[key] = (time.monotonic(), result)
+            return result
+        if key not in self.catalog_tasks:
+            task = asyncio.create_task(discover())
+            self.catalog_tasks[key] = task
+            task.add_done_callback(lambda _: self.catalog_tasks.pop(key, None))
+        return await asyncio.shield(self.catalog_tasks[key])
 
     async def probe(self, backend: str) -> dict:
         if backend not in FACTORIES:
@@ -52,6 +93,18 @@ class AgentService:
             return {"ready": False, "authStatus": "unknown", "detail": str(exc) or "连接超时"}
         finally:
             await instance.close()
+
+    async def configure(self, backend, model="", effort="", *, make_default=False):
+        previous = self.config.settings()
+        changed = model != previous["models"].get(backend, "") or effort != previous["reasoningEfforts"].get(backend, "")
+        if changed and (model or effort):
+            catalog = await self.discover(backend, model)
+            if not catalog["available"]:
+                raise AgentError(catalog["detail"])
+            select_model(catalog, model)
+            select_effort(catalog, effort)
+        self.config.save(backend, model, effort, make_default=make_default)
+        return self.status()
 
     async def ask(self, session_id, items, emit):
         if not items:
@@ -89,11 +142,20 @@ class AgentService:
         with self.config.lock(request.session_id):
             saved = self.config.session(request.session_id)
             backend = saved.get("backend") or self.config.settings()["backend"]
+            if request.backend:
+                if saved.get("backend") and saved["backend"] != request.backend:
+                    raise AgentError("切换 Agent 请新建对话，原会话已保留")
+                backend = request.backend
             if backend not in FACTORIES:
                 raise AgentError("此会话使用 OpenClaw，请通过网关入口继续")
-            request.model = request.model or saved.get("model", self.config.settings()["models"].get(backend, ""))
+            settings = self.config.settings()
+            if request.model is None:
+                request.model = saved.get("model", settings["models"].get(backend, ""))
+            if request.reasoning_effort is None:
+                request.reasoning_effort = saved.get("reasoningEffort", settings["reasoningEfforts"].get(backend, ""))
             instance = FACTORIES[backend](self.config)
-            saved.update(backend=backend, model=request.model, state="running", updatedAt=time.time())
+            saved.update(backend=backend, model=request.model, reasoningEffort=request.reasoning_effort,
+                         state="running", updatedAt=time.time())
             atomic_json(self.config.session_path(request.session_id), saved)
 
             def save_session(native_id):
@@ -137,3 +199,6 @@ class AgentService:
 
     async def close(self):
         await asyncio.gather(*(self.stop(key) for key in list(self.running)), return_exceptions=True)
+        for task in list(self.catalog_tasks.values()):
+            task.cancel()
+        await asyncio.gather(*list(self.catalog_tasks.values()), return_exceptions=True)

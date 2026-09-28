@@ -16,7 +16,7 @@ import SubNav from './components/SubNav';
 import OnboardingWizard from './components/OnboardingWizard';
 import SettingsPanel from './components/SettingsPanel';
 import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat } from './lib/api';
-import type { PersonaItem, UploadedFile, ChatQuestion } from './lib/api';
+import type { PersonaItem, UploadedFile, ChatQuestion, AgentSelection } from './lib/api';
 import { questionStatus } from './lib/api';
 import { deleteSession as deleteRemoteSession } from './lib/api';
 import {
@@ -357,6 +357,7 @@ export default function App() {
       },
       // onHeartbeat：防呆心跳（30s 静默）。只设独立的「未卡住」提示，绝不写 activity/thinking → 不顶掉真实状态。
       (note) => setStreams((p) => (p[sessionId] ? { ...p, [sessionId]: { ...p[sessionId], stillWorking: note } } : p)),
+      sessionsRef.current.find((s) => s.id === sessionId)?.agentSelection,
     );
   }, [appendAssistant, clearStream]);
 
@@ -493,6 +494,7 @@ export default function App() {
         const base = truncateAt != null ? s.messages.slice(0, truncateAt) : s.messages;
         const updated = {
           ...s,
+          draft: undefined,
           messages: [...base, {
             role: 'user',
             content: visible,
@@ -512,6 +514,30 @@ export default function App() {
   const handleSendMessage = useCallback((sessionId: string, displayText: string, attachments?: UploadedFile[]) => {
     sendUserAndStream(sessionId, displayText, attachments);
   }, [sendUserAndStream]);
+
+  const handleAgentSelection = useCallback((sessionId: string, selection: AgentSelection, switchAgent: boolean,
+    draft: { text: string; attachments: UploadedFile[] }) => {
+    const current = sessionsRef.current.find((s) => s.id === sessionId);
+    if (!current) return;
+    // Auto-started topic/skill conversations may hydrate their selection after
+    // streaming begins. Only the initial hydration is allowed during a turn.
+    if (streamCtl.current[sessionId] && (switchAgent || current.agentSelection)) return;
+    if (switchAgent && (current.messages.length > 0 || current.sessionKey) && current.agentSelection?.backend !== selection.backend) {
+      // Vendor histories are incompatible. Keep the old conversation intact.
+      // Attachments belong to the old session; retain them there for resuming.
+      const fresh = { ...createSession(current.persona), agentSelection: selection, draft: { text: draft.text, attachments: [] } };
+      setSessions((previous) => {
+        const next = [fresh, ...previous.map((s) => s.id === sessionId ? { ...s, draft } : s)];
+        sessionsRef.current = next; saveSessions(next); return next;
+      });
+      setActiveSessionId(fresh.id); setCurrentPage('chat');
+    } else {
+      setSessions((previous) => {
+        const next = previous.map((s) => s.id === sessionId ? { ...s, agentSelection: selection } : s);
+        sessionsRef.current = next; saveSessions(next); return next;
+      });
+    }
+  }, []);
 
   // 重试/编辑重发：从该用户消息处截断（丢弃它及其之后），用 text 重新发起。
   const handleResend = useCallback((
@@ -703,6 +729,7 @@ export default function App() {
             stream={streams[activeSession.id]}
             onSend={(displayText, attachments) => handleSendMessage(activeSession.id, displayText, attachments)}
             onStop={() => handleStopStream(activeSession.id)}
+            onAgentSelection={(selection, switchAgent, draft) => handleAgentSelection(activeSession.id, selection, switchAgent, draft)}
             onResend={(userIndex, displayText, attachments, legacyAgentText) => handleResend(
               activeSession.id, userIndex, displayText, attachments, legacyAgentText,
             )}

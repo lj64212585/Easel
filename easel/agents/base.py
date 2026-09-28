@@ -14,7 +14,9 @@ class AgentRequest:
     session_id: str
     message: str
     timeout: float = 7200
-    model: str = ""
+    model: str | None = None
+    backend: str | None = None
+    reasoning_effort: str | None = None
 
 
 Emit = Callable[[str, object], None]
@@ -41,3 +43,8 @@ class AgentBackend(ABC):
 
     @abstractmethod
     async def probe(self) -> dict: ...
+
+    @abstractmethod
+    async def discover(self, model: str = "") -> dict:
+        """Read model and reasoning choices from the CLI, without a prompt."""
+        ...

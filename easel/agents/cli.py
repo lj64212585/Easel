@@ -91,7 +91,8 @@ def cmd_agent(args):
         if args.action == "use":
             if not args.backend:
                 raise AgentError("请指定 openclaw、codex 或 codebuddy")
-            service.config.save(args.backend, args.model or "")
+            model = args.model if args.model is not None else service.config.settings()["models"].get(args.backend, "")
+            service.config.save(args.backend, model, "" if args.model is not None else None)
             print(f"新会话将使用 {args.backend}；已有会话保持原后端。")
         elif args.action == "probe":
             backend = args.backend or service.backend_for()

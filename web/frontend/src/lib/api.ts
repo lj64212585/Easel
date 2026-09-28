@@ -35,13 +35,31 @@ export interface StatusResponse {
 export interface AgentSettings {
   backend: string;
   models: Record<string, string>;
+  reasoningEfforts: Record<string, string>;
   environmentOverride: boolean;
-  backends: { id: string; name: string; installed: boolean; command: string[]; model: string }[];
+  backends: { id: string; name: string; installed: boolean; command: string[]; model: string; reasoningEffort: string }[];
 }
 
+export interface AgentSelection { backend: string; model: string; reasoningEffort: string; }
+export interface AgentOption { id: string; name: string; description?: string; }
+export interface AgentCatalog {
+  backend: string;
+  available: boolean;
+  models: AgentOption[];
+  defaultModel: string;
+  selectedModel: string;
+  reasoningOptions: AgentOption[];
+  defaultReasoningEffort: string;
+  detail: string;
+}
+export const fetchAgentOptions = (backend: string, model = '', refresh = false) =>
+  request<AgentCatalog>(`/api/agent/options/${encodeURIComponent(backend)}?${new URLSearchParams({ model, refresh: String(refresh) })}`);
+export const fetchAgentSelection = (sessionId: string) =>
+  request<AgentSelection>(`/api/agent/session/${encodeURIComponent(sessionId)}`);
+
 export const fetchAgentSettings = () => request<AgentSettings>('/api/agent/settings');
-export const saveAgentSettings = (backend: string, model: string) => request<AgentSettings>('/api/agent/settings', {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend, model }),
+export const saveAgentSettings = (backend: string, model: string, reasoningEffort = '', makeDefault = false) => request<AgentSettings>('/api/agent/settings', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend, model, reasoningEffort, makeDefault }),
 });
 export const probeAgent = (backend: string) => request<{ ready: boolean; authStatus: string; authMode?: string; detail: string }>('/api/agent/probe', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend }),
@@ -579,6 +597,7 @@ export function streamChat(
   attachments: UploadedFile[] = [],
   onQuestion?: (q: ChatQuestion) => void,
   onHeartbeat?: (note: string) => void,
+  selection?: AgentSelection,
 ): AbortController {
   const controller = new AbortController();
   let lastEventId = 0;
@@ -666,7 +685,7 @@ export function streamChat(
         const res = first
           ? await fetch(`${BASE}/api/chat/stream`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message, persona: persona || undefined, sessionId, turnId, attachments }),
+              body: JSON.stringify({ message, persona: persona || undefined, sessionId, turnId, attachments, ...selection }),
               signal: controller.signal,
             })
           : await fetch(`${BASE}/api/chat/jobs/${encodeURIComponent(turnId || '')}/stream?after=${lastEventId}`, {

@@ -1,65 +1,68 @@
 import { useEffect, useState } from 'react';
 import { fetchAgentSettings, probeAgent, saveAgentSettings } from '../lib/api';
-import type { AgentSettings } from '../lib/api';
+import type { AgentSelection, AgentSettings } from '../lib/api';
+import AgentModelFields from './AgentModelFields';
 
-export default function AgentBackendPanel({ onBackendChange }: { onBackendChange: (backend: string) => void }) {
-  const [settings, setSettings] = useState<AgentSettings>();
-  const [backend, setBackend] = useState('openclaw');
-  const [model, setModel] = useState('');
+function AgentCard({ agent, settings, onSaved, onConfigureOpenClaw }: {
+  agent: AgentSettings['backends'][number]; settings: AgentSettings;
+  onSaved: (settings: AgentSettings) => void; onConfigureOpenClaw: () => void;
+}) {
+  const [value, setValue] = useState<AgentSelection>({ backend: agent.id, model: agent.model, reasoningEffort: agent.reasoningEffort });
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
-  useEffect(() => {
-    let active = true;
-    fetchAgentSettings().then((data) => {
-      if (!active) return;
-      setSettings(data); setBackend(data.backend); setModel(data.models[data.backend] || '');
-      onBackendChange(data.backend);
-    }).catch((e) => { if (active) setError(String(e)); });
-    return () => { active = false; };
-  }, [onBackendChange]);
-  const selected = settings?.backends.find((row) => row.id === backend);
-  const act = async (save: boolean) => {
+  const act = async (action: 'save' | 'default' | 'probe') => {
     setBusy(true); setError(''); setNote('');
     try {
-      if (save) {
-        const data = await saveAgentSettings(backend, model.trim());
-        setSettings(data); onBackendChange(data.backend);
-        setNote('已保存。请新建会话使用；已有会话继续使用原后端。');
-        window.dispatchEvent(new Event('easel-agent-changed'));
-      } else {
-        const result = await probeAgent(backend);
+      if (action === 'probe') {
+        const result = await probeAgent(agent.id);
         const detail = result.authMode === 'chatgpt' ? `${result.detail}（ChatGPT 订阅登录）` : result.detail;
         if (result.ready) setNote(detail); else setError(detail);
+      } else {
+        const data = await saveAgentSettings(agent.id, value.model, value.reasoningEffort, action === 'default');
+        onSaved(data);
+        setNote(action === 'default' ? '已设为新对话默认 Agent。' : `已保存 ${agent.name} 默认配置，其他 Agent 配置不变。`);
+        window.dispatchEvent(new Event('easel-agent-changed'));
       }
     } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
-  return <div className="agent-backend-panel">
-    <div className="panel-top"><strong>执行助手</strong><span className="desc">选择处理对话与技能的本地助手</span></div>
-    <div className="agent-backend-fields">
-      <label>助手<select aria-label="执行助手" value={backend} disabled={busy || !settings}
-        onChange={(e) => {
-          const next = e.target.value;
-          setBackend(next); setModel(settings?.models[next] || ''); setNote(''); setError('');
-          onBackendChange(next);
-        }}>
-        {(settings?.backends || []).map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
-      </select></label>
-      {backend !== 'openclaw' && <label>模型（可选）<input aria-label="Agent 模型" value={model} disabled={busy}
-        placeholder="留空使用 CLI 默认模型" onChange={(e) => setModel(e.target.value)} /></label>}
-      <button className="btn btn-sm" disabled={busy || !settings} onClick={() => void act(true)}>保存助手</button>
-      <button className="btn btn-sm" disabled={busy || !selected?.installed || backend === 'openclaw'} onClick={() => void act(false)}>
-        {busy ? '处理中…' : '检测连接'}
-      </button>
+  return <section className="agent-config-card" aria-label={`${agent.name} 配置`}>
+    <div className="panel-top"><strong>{agent.name}</strong>
+      {settings.backend === agent.id && <span className="pill ok">新对话默认</span>}
+      <span className="desc">{agent.installed ? '已检测到 CLI' : '未检测到 CLI'}</span>
     </div>
-    {selected && <div className="foot-note">
-      {selected.installed ? `已找到：${selected.command.join(' ')}` : `未找到 ${selected.name} CLI。`}
-      {backend !== 'openclaw' && <p>使用 CLI 自己的登录与额度；在项目终端运行 <code>.venv/bin/python -m easel agent login {backend}</code> 完成登录。主对话无需填写 API Key。媒体服务仍在对应通道配置。</p>}
-      {backend === 'codebuddy' && <p>此入口连接 CodeBuddy Code。WorkBuddy 桌面登录是否共享，以 CLI 实际认证结果为准。</p>}
-      {settings?.environmentOverride && <p>当前后端由 EASEL_AGENT_BACKEND 环境变量固定。</p>}
-    </div>}
+    <div className="agent-backend-fields">
+      {agent.id !== 'openclaw' && <AgentModelFields value={value} onChange={setValue} disabled={busy} labelPrefix="默认" />}
+      {agent.id === 'openclaw' && <button className="btn btn-sm" onClick={onConfigureOpenClaw}>配置网关模型</button>}
+    </div>
+    <div className="agent-card-actions">
+      {agent.id !== 'openclaw' && <button className="btn btn-sm" disabled={busy} onClick={() => void act('save')}>保存默认配置</button>}
+      <button className="btn btn-sm" disabled={busy || settings.backend === agent.id || settings.environmentOverride} onClick={() => void act('default')}>设为新对话默认</button>
+      <button className="btn btn-sm" disabled={busy || !agent.installed} onClick={() => void act('probe')}>{busy ? '处理中…' : '检测连接'}</button>
+    </div>
+    {agent.id !== 'openclaw' && <div className="foot-note">登录命令：<code>.venv/bin/python -m easel agent login {agent.id}</code></div>}
     {note && <p role="status" className="save-note">{note}</p>}
+    {error && <p role="alert" className="save-note err">{error}</p>}
+  </section>;
+}
+
+export default function AgentBackendPanel({ onBackendChange }: { onBackendChange: (backend: string) => void }) {
+  const [settings, setSettings] = useState<AgentSettings>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    fetchAgentSettings().then((data) => {
+      if (active) { setSettings(data); onBackendChange(data.backend); }
+    }).catch((e) => { if (active) setError(String(e)); });
+    return () => { active = false; };
+  }, [onBackendChange]);
+  return <div className="agent-backend-panel">
+    <div className="panel-top"><strong>执行助手</strong><span className="desc">分别配置多个 Agent，在对话中选择使用</span></div>
+    {settings && [...settings.backends].sort((a, b) => Number(a.id === 'openclaw') - Number(b.id === 'openclaw')).map((agent) => <AgentCard key={agent.id} agent={agent} settings={settings}
+      onSaved={(data) => { setSettings(data); onBackendChange(data.backend); }} onConfigureOpenClaw={() => onBackendChange('openclaw')} />)}
+    {settings?.environmentOverride && <p className="foot-note">新对话默认 Agent 由 EASEL_AGENT_BACKEND 固定；仍可配置和选择其他 Agent。</p>}
+    <p className="foot-note">本地助手沿用各自 CLI 的登录与额度，媒体服务独立配置。WorkBuddy 桌面登录不一定与 CodeBuddy CLI 共享。</p>
     {error && <p role="alert" className="save-note err">{error}</p>}
   </div>;
 }

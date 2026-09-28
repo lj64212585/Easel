@@ -5,6 +5,7 @@ import json
 from .base import AgentBackend, AgentError
 from .config import AgentConfig, context
 from .rpc import RpcProcess
+from .options import acp_catalog, select_model, select_effort
 
 
 class CodeBuddyBackend(AgentBackend):
@@ -13,6 +14,7 @@ class CodeBuddyBackend(AgentBackend):
         self.rpc = None
         self.native_id = None
         self.loading = False
+        self.configuration = {}
 
     async def connect(self):
         self.rpc = RpcProcess(self.config.command("codebuddy") + ["--acp"],
@@ -40,10 +42,7 @@ class CodeBuddyBackend(AgentBackend):
         return {"ready": True, "authStatus": "unknown", "authMode": "cli",
                 "detail": "CodeBuddy ACP 会话已就绪；实际模型权限与账户额度仍以对话结果为准。"}
 
-    async def run(self, request, native_id, emit, ask, save_session):
-        await self.connect()
-        self.rpc.on_notification = lambda method, params: self._event(method, params, emit)
-        self.rpc.on_request = lambda method, params: self._request(method, params, ask)
+    async def _open_session(self, native_id=None):
         params = {"cwd": str(self.config.root), "mcpServers": []}
         if native_id:
             caps = self.capabilities.get("agentCapabilities", {})
@@ -61,9 +60,59 @@ class CodeBuddyBackend(AgentBackend):
         finally:
             self.loading = False
         self.native_id = native_id or result["sessionId"]
+        self.configuration = result
+
+    def _capture_config(self, method, params):
+        if method != "session/update" or (self.native_id and params.get("sessionId") != self.native_id):
+            return
+        update = params.get("update", {})
+        if update.get("sessionUpdate") == "config_option_update":
+            self.configuration["configOptions"] = update.get("configOptions", [])
+        elif update.get("sessionUpdate") == "model_update":
+            self.configuration["models"] = update.get("models", update)
+
+    async def _select_model(self, model):
+        catalog = acp_catalog(self.configuration)
+        selected = select_model(catalog, model)
+        if selected:
+            if catalog.get("modelConfigId"):
+                result = await self.rpc.request("session/set_config_option", {
+                    "sessionId": self.native_id, "configId": catalog["modelConfigId"], "value": selected})
+            else:
+                result = await self.rpc.request("session/set_model", {"sessionId": self.native_id, "modelId": selected})
+            if isinstance(result, dict):
+                self.configuration.update(result)
+        return selected
+
+    async def discover(self, model=""):
+        await self.connect()
+        self.rpc.on_notification = self._capture_config
+        await self._open_session()
+        initial = acp_catalog(self.configuration)
+        default = initial["defaultModel"]
+        if model and model not in {row["id"] for row in initial["models"]}:
+            return {**initial, "selectedModel": model, "reasoningOptions": [], "defaultReasoningEffort": ""}
+        if model:
+            await self._select_model(model)
+        catalog = acp_catalog(self.configuration, model)
+        catalog["defaultModel"] = default
+        return catalog
+
+    async def run(self, request, native_id, emit, ask, save_session):
+        await self.connect()
+        self.rpc.on_notification = lambda method, params: self._event(method, params, emit)
+        self.rpc.on_request = lambda method, params: self._request(method, params, ask)
+        await self._open_session(native_id)
         save_session(self.native_id)
         if request.model:
-            await self.rpc.request("session/set_model", {"sessionId": self.native_id, "modelId": request.model})
+            await self._select_model(request.model)
+        catalog = acp_catalog(self.configuration, request.model or "")
+        effort = select_effort(catalog, request.reasoning_effort or "")
+        if effort and catalog.get("reasoningConfigId"):
+            value = effort == "true" if catalog.get("reasoningConfigType") == "boolean" else effort
+            await self.rpc.request("session/set_config_option", {
+                "sessionId": self.native_id, "configId": catalog["reasoningConfigId"], "value": value,
+                **({"type": "boolean"} if isinstance(value, bool) else {})})
         # ACP has no standard system-prompt field. Include the authoritative
         # Easel context on each turn so resumed sessions pick up skill updates.
         prompt = context(self.config.root) + "\n\n# 当前用户消息\n" + request.message
@@ -76,6 +125,7 @@ class CodeBuddyBackend(AgentBackend):
             raise AgentError(f"CodeBuddy 本轮未正常完成：{reason or '缺少终止状态'}")
 
     def _event(self, method, params, emit):
+        self._capture_config(method, params)
         if self.loading or method != "session/update" or params.get("sessionId") != self.native_id:
             return
         update = params.get("update", {})
