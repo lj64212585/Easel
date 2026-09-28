@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -120,14 +121,22 @@ class AgentConfig:
             ]
         for candidate in candidates:
             if candidate and Path(candidate).is_file():
+                candidate = os.path.abspath(candidate)
                 # JS entrypoints can also be explicitly selected without a shell.
                 if candidate.endswith((".js", ".mjs", ".cjs")):
                     node = shutil.which("node")
                     if node:
-                        return [node, candidate]
+                        return [os.path.abspath(node), candidate]
                 if os.access(candidate, os.X_OK):
                     return [candidate]
         raise AgentError(f"未找到 {BACKENDS[backend]} CLI；请安装并登录，或设置 EASEL_{backend.upper()}_BIN")
+
+    def login_hint(self, backend: str) -> str:
+        command = self.command(backend) + (["login"] if backend == "codex" else [])
+        if os.name == "nt":
+            # PowerShell requires the call operator for quoted executable paths.
+            return "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in command)
+        return shlex.join(command)
 
     def environment(self) -> dict[str, str]:
         env = os.environ.copy()

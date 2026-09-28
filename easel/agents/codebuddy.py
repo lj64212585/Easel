@@ -37,7 +37,7 @@ class CodeBuddyBackend(AgentBackend):
         except AgentError as exc:
             if "authentication" in str(exc).lower() or "auth required" in str(exc).lower():
                 return {"ready": False, "authStatus": "required", "authMode": "cli",
-                        "detail": "CodeBuddy 尚未登录。请运行 python -m easel agent login codebuddy；WorkBuddy 桌面登录不一定共享。"}
+                        "detail": f"CodeBuddy 尚未登录。请运行：{self.config.login_hint('codebuddy')}，启动后按提示或输入 /login 登录；WorkBuddy 桌面登录不一定共享。"}
             raise
         return {"ready": True, "authStatus": "unknown", "authMode": "cli",
                 "detail": "CodeBuddy ACP 会话已就绪；实际模型权限与账户额度仍以对话结果为准。"}
@@ -55,7 +55,7 @@ class CodeBuddyBackend(AgentBackend):
             result = await self.rpc.request("session/load" if native_id else "session/new", params, timeout=60)
         except AgentError as exc:
             if "authentication" in str(exc).lower() or "auth required" in str(exc).lower():
-                raise AgentError("CodeBuddy 尚未登录。请运行 python -m easel agent login codebuddy，并按提示或用 /login 登录后重试；WorkBuddy 桌面登录不一定共享。") from exc
+                raise AgentError(f"CodeBuddy 尚未登录。请运行：{self.config.login_hint('codebuddy')}，启动后按提示或输入 /login 登录后重试；WorkBuddy 桌面登录不一定共享。") from exc
             raise
         finally:
             self.loading = False

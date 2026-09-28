@@ -35,7 +35,7 @@ class CodexBackend(AgentBackend):
         authenticated = bool(account)
         return {"ready": authenticated, "authStatus": "authenticated" if authenticated else "required",
                 "authMode": account.get("type") if account else None,
-                "detail": "已连接 Codex，认证由本地 CLI 管理" if authenticated else "请先运行 python -m easel agent login codex"}
+                "detail": "已连接 Codex，认证由本地 CLI 管理" if authenticated else f"请先运行：{self.config.login_hint('codex')}"}
 
     async def discover(self, model=""):
         if not self.rpc:

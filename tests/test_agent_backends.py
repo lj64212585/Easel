@@ -263,7 +263,7 @@ def test_codebuddy_probe_reports_login_without_sending_prompt(service, monkeypat
     async def run():
         result = await service.probe("codebuddy")
         assert not result["ready"] and result["authStatus"] == "required"
-        assert "agent login codebuddy" in result["detail"]
+        assert service.config.login_hint("codebuddy") in result["detail"]
         service.config.save("codebuddy")
         with pytest.raises(AgentError, match="尚未登录"):
             await service.run(AgentRequest("needs-login", "hello", 5), lambda *_: None)

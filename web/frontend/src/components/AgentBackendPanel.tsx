@@ -41,7 +41,11 @@ function AgentCard({ agent, settings, onSaved, onConfigureOpenClaw }: {
       <button className="btn btn-sm" disabled={busy || settings.backend === agent.id || settings.environmentOverride} onClick={() => void act('default')}>设为新对话默认</button>
       <button className="btn btn-sm" disabled={busy || !agent.installed} onClick={() => void act('probe')}>{busy ? '处理中…' : '检测连接'}</button>
     </div>
-    {agent.id !== 'openclaw' && <div className="foot-note">登录命令：<code>.venv/bin/python -m easel agent login {agent.id}</code></div>}
+    {agent.id !== 'openclaw' && <div className="foot-note">
+      {agent.loginCommand ? <>登录命令：<code>{agent.loginCommand}</code>
+        {agent.id === 'codebuddy' && <span>，启动后按提示或输入 <code>/login</code> 登录。</span>}
+      </> : '检测到 CLI 后将显示完整登录命令。'}
+    </div>}
     {note && <p role="status" className="save-note">{note}</p>}
     {error && <p role="alert" className="save-note err">{error}</p>}
   </section>;

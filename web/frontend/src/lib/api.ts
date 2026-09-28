@@ -37,7 +37,7 @@ export interface AgentSettings {
   models: Record<string, string>;
   reasoningEfforts: Record<string, string>;
   environmentOverride: boolean;
-  backends: { id: string; name: string; installed: boolean; command: string[]; model: string; reasoningEffort: string }[];
+  backends: { id: string; name: string; installed: boolean; command: string[]; loginCommand: string; model: string; reasoningEffort: string }[];
 }
 
 export interface AgentSelection { backend: string; model: string; reasoningEffort: string; }

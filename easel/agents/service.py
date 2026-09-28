@@ -50,6 +50,7 @@ class AgentService:
                 command, installed = [], False
             rows.append({"id": key, "name": label, "installed": installed,
                          "command": command, "model": settings["models"].get(key, ""),
+                         "loginCommand": self.config.login_hint(key) if installed and key in FACTORIES else "",
                          "reasoningEffort": settings["reasoningEfforts"].get(key, "")})
         return {**settings, "backends": rows}
 
