@@ -2,6 +2,8 @@
 
 > OpenClaw agent 的 prompt 由多层文件组合而成，每层职责明确、互不干扰。
 
+本地 Codex / CodeBuddy 后端复用下述人格、编排规则和技能：Codex 通过 `developerInstructions` 注入；CodeBuddy 通过每轮消息上下文注入。`easel/agents/config.py` 动态补入项目路径，直接读取 `profiles/` 和 `skills/openclaw/`，替代 OpenClaw 专属的 CONTEXT 与问答 RPC 说明，无需运行 `sync.sh`。本地 CLI 对话每轮都附带画像前缀。详见 [本地 Agent 后端](agent-backends.md)。下文的 system prompt / workspace 同步机制指 OpenClaw 路径。
+
 ## 组合顺序
 
 ```

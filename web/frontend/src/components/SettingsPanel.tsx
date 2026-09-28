@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import EnvBoard from './EnvBoard';
+import AgentBackendPanel from './AgentBackendPanel';
 import type { JobView } from './EnvBoard';
 import {
   fetchEnvTools, startEnvInstall, fetchEnvJob,
@@ -58,6 +59,7 @@ export default function SettingsPanel({ onClose }: Props) {
 
   // ── 环境安装（引擎真实数据） ──────────────────────────────
   const [tools, setTools] = useState<EnvTool[]>([]);
+  const [agentBackend, setAgentBackend] = useState('openclaw');
   const [python, setPython] = useState('');
   const [envLoading, setEnvLoading] = useState(true);
   const [envError, setEnvError] = useState('');
@@ -435,14 +437,14 @@ export default function SettingsPanel({ onClose }: Props) {
             <button
               className="btn btn-sm btn-primary"
               onClick={() => void saveCurrent()}
-              disabled={saving || sec !== 'model'}
+              disabled={saving || sec !== 'model' || (chan === 'chat' && agentBackend !== 'openclaw')}
             >
               {saving ? '保存中…' : '保存配置'}
             </button>
             <button
               className="btn btn-sm"
               onClick={() => void doSelftest(sec === 'model' ? chan : 'all')}
-              disabled={testing}
+              disabled={testing || (sec === 'model' && chan === 'chat' && agentBackend !== 'openclaw')}
             >
               {testing ? '自测中…' : '全部自测'}
             </button>
@@ -477,6 +479,8 @@ export default function SettingsPanel({ onClose }: Props) {
 
                 {chan === 'chat' && (
                   <section className="st-panel active">
+                    <AgentBackendPanel onBackendChange={setAgentBackend} />
+                    {agentBackend === 'openclaw' && <>
                     <div className="panel-top">
                       <span className={`pill ${chatOk ? 'ok' : 'off'}`}><span className="dot" />{chatOk ? '主通道在线' : '未配置'}</span>
                       <span className="desc">经本地网关路由（主备自动降级）</span>
@@ -487,6 +491,7 @@ export default function SettingsPanel({ onClose }: Props) {
                     {renderBoard(chatRows, { onRow: (i, p) => updateRow(setChatRows, i, p), onPrimary: setPrimaryRow, onRemove: removeRow })}
                     <div className="add-row" onClick={addProvider}>＋ 添加供应商（填名称 / 模型 / Base URL / Key；点「设为主」切换生效通道）</div>
                     <div className="foot-note">改完点右上角「保存配置」（key 留空=不改）；自动降级链随统一网关接入开放。</div>
+                    </>}
                   </section>
                 )}
 
@@ -588,7 +593,7 @@ export default function SettingsPanel({ onClose }: Props) {
         </div>
 
         <div className="settings-foot">
-          ⓘ 环境安装在后台执行，装完自动回写状态；模型配置保存写入 .env（对话经本地网关路由，主备自动降级）。
+          ⓘ 本地助手使用 CLI 登录；媒体与 OpenClaw 模型配置保存到 .env。环境安装完成后自动更新状态。
         </div>
       </div>
     </div>

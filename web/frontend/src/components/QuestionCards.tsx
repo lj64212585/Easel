@@ -103,19 +103,19 @@ function QuestionCard({ question, onAnswered }: { question: ChatQuestion; onAnsw
                       disabled={busy}
                       title="点击移除"
                       onClick={() => removeCustom(it, v)}>
-                      <strong>{v}</strong>
+                      <strong>{it.isSecret ? '••••••••' : v}</strong>
                       <span>自定义 · 点击移除</span>
                     </button>
                   ))}
-                  <button className="question-card__other" disabled={busy}
+                  {it.allowCustom !== false && <button className="question-card__other" disabled={busy}
                     onClick={() => setShowCustom((s) => ({ ...s, [it.questionId]: !s[it.questionId] }))}>
                     {ctl ? '收起自定义输入' : '自行输入…'}
-                  </button>
+                  </button>}
                 </div>
                 {ctl && (
                   <div className="question-card__custom">
                     <input
-                      type="text"
+                      type={it.isSecret ? 'password' : 'text'}
                       value={custom[it.questionId] || ''}
                       placeholder="输入你的答案"
                       onChange={(e) => setCustom((c) => ({ ...c, [it.questionId]: e.target.value }))}

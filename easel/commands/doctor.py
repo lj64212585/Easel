@@ -241,6 +241,21 @@ def _primary_model_routable() -> tuple[bool, str]:
 
 
 def cmd_doctor(_args) -> int:
+    from easel.agents import AgentService
+    service = AgentService(PROJECT_ROOT)
+    if service.backend_for() != "openclaw":
+        import asyncio
+        backend = service.backend_for()
+        print(f"Easel — {backend} 本地 Agent 检查\n")
+        result = asyncio.run(service.probe(backend))
+        ok = _check(f"{backend} CLI 连接", result["ready"], result["detail"])
+        print(f"  {result['detail']}")
+        ok &= _check("Python >= 3.10", _python_version_ok())
+        for module in ("fastapi", "uvicorn", "sse_starlette", "multipart"):
+            ok &= _check(f"Python package: {module}", _module_available(module))
+        ok &= _check("Web frontend build", (PROJECT_ROOT / "web/frontend/dist/index.html").is_file())
+        print("\n媒体工具与媒体 API 按对应技能单独配置；本地 Agent 不需要 OpenClaw 或聊天 API Key。")
+        return 0 if ok else 1
     print("Easel — 环境检查\n")
     all_ok = True
 

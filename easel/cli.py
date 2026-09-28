@@ -25,6 +25,8 @@ from easel.openclaw_cmd import openclaw_base_cmd
 from easel.persona import list_personas as _list_personas
 from easel.persona import persona_prefix
 from easel.timeouts import TIMEOUT_CHAT
+from easel.agents import AgentService
+from easel.agents.cli import cmd_agent, interactive
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROFILES_DIR = PROJECT_ROOT / "profiles"
@@ -121,12 +123,17 @@ def cmd_chat(_args) -> int:
     else:
         print(f"\n  {YELLOW}→{NC} 通用模式")
 
-    session_key = f"easel-{time.strftime('%m%d-%H%M%S')}"
+    session_key = getattr(_args, "session", None) or f"easel-{time.time_ns()}"
 
     print(f"  {DIM}会话: {session_key}{NC}")
-    print(f"  {DIM}切换历史会话: 对话中输入 /session{NC}")
+    local_agent = AgentService(PROJECT_ROOT).backend_for(session_key) != "openclaw"
+    history_hint = f"继续本会话: easel chat --session {session_key}" if local_agent else "切换历史会话: 对话中输入 /session"
+    print(f"  {DIM}{history_hint}{NC}")
     print(f"  {CYAN}Ctrl+C{NC} 退出")
     print()
+
+    if local_agent:
+        return interactive(PROJECT_ROOT, session_key, selected_persona)
 
     prefix = persona_prefix(selected_persona)
     try:
@@ -171,7 +178,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # chat
     p_chat = sub.add_parser("chat", help="交互对话（新会话）")
+    p_chat.add_argument("--session", help="继续已有的本地 Agent 会话 ID")
     p_chat.set_defaults(func=cmd_chat)
+
+    p_agent = sub.add_parser("agent", help="选择或检测本地 Agent 后端")
+    p_agent.add_argument("action", choices=["status", "use", "probe", "login"], nargs="?", default="status")
+    p_agent.add_argument("backend", choices=["openclaw", "codex", "codebuddy"], nargs="?")
+    p_agent.add_argument("--model", help="模型名称；省略时沿用 CLI 默认模型")
+    p_agent.set_defaults(func=cmd_agent)
 
     # doctor
     p_doctor = sub.add_parser("doctor", help="检查环境")

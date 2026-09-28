@@ -51,6 +51,7 @@ export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>(() => loadSessions());
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [gatewayStatus, setGatewayStatus] = useState('connecting');
+  const [agentName, setAgentName] = useState('OpenClaw');
   const [showRecommend, setShowRecommend] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -140,10 +141,12 @@ export default function App() {
 
   // Fetch status on mount — 真实反映 gateway 状态 + 首次引导检测
   useEffect(() => {
-    fetchStatus()
+    const refresh = () => { void fetchStatus()
       .then((data) => {
         setPersonas(data.personas || []);
-        setGatewayStatus(data.gateway ? 'connected' : 'disconnected');
+        const local = data.agent && data.agent.backend !== 'openclaw';
+        setAgentName(data.agent?.backends.find((b) => b.id === data.agent?.backend)?.name || 'OpenClaw');
+        setGatewayStatus(local ? (data.agentAvailable ? 'available' : 'disconnected') : (data.gateway ? 'connected' : 'disconnected'));
         // 首次使用：没有任何个性化画像 且 未看过引导 → 推荐配置
         if ((data.personas || []).length === 0 && !onboardingSeen()) {
           setShowRecommend(true);
@@ -151,7 +154,10 @@ export default function App() {
       })
       .catch(() => {
         setGatewayStatus('disconnected');
-      });
+      }); };
+    refresh();
+    window.addEventListener('easel-agent-changed', refresh);
+    return () => window.removeEventListener('easel-agent-changed', refresh);
   }, []);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
@@ -762,6 +768,7 @@ export default function App() {
         onSessionArchive={handleSessionArchive}
         onNewChat={handleNewChat}
         gatewayStatus={gatewayStatus}
+        agentName={agentName}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <main className="main-content">

@@ -26,9 +26,26 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 export interface StatusResponse {
   gateway: boolean;
+  agentAvailable?: boolean;
+  agent?: AgentSettings;
   skills: SkillItem[];
   personas: PersonaItem[];
 }
+
+export interface AgentSettings {
+  backend: string;
+  models: Record<string, string>;
+  environmentOverride: boolean;
+  backends: { id: string; name: string; installed: boolean; command: string[]; model: string }[];
+}
+
+export const fetchAgentSettings = () => request<AgentSettings>('/api/agent/settings');
+export const saveAgentSettings = (backend: string, model: string) => request<AgentSettings>('/api/agent/settings', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend, model }),
+});
+export const probeAgent = (backend: string) => request<{ ready: boolean; authStatus: string; authMode?: string; detail: string }>('/api/agent/probe', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend }),
+});
 
 export interface PersonaItem {
   name: string;
@@ -305,6 +322,8 @@ export interface ChatQuestionItem {
   question: string;
   options?: ChatQuestionOption[];
   multiSelect?: boolean;
+  allowCustom?: boolean;
+  isSecret?: boolean;
 }
 export interface ChatQuestion {
   id: string;              // gateway question record id (ask_...)
