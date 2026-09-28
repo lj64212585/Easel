@@ -42,6 +42,7 @@ if str(PROJECT_ROOT / "scripts") not in sys.path:
 
 from easel.openclaw_cmd import openclaw_base_cmd
 from easel.agents import AgentError, AgentRequest, AgentService
+from easel.trend_sources import fetch_direct_trends, make_opener
 from easel.persona import load_profile_text, persona_prefix, chat_turn_message, profile_exists, _FILE_ORDER
 from easel.timeouts import TIMEOUT_CHAT, TIMEOUT_DIRECT, TIMEOUT_PRODUCE
 
