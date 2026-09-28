@@ -1,6 +1,6 @@
-"""easel skill — 运行 SKILL，统一通过 OpenClaw agent 处理。
+"""easel skill — 通过当前选择的 Agent 后端运行 SKILL。
 
-所有 SKILL 请求都发给 OpenClaw agent，由 OpenClaw 根据 AGENTS.md 的规则
+所有 SKILL 请求都发给当前 Agent，由 Agent 根据 AGENTS.md 的规则
 读对应 SKILL 自己执行、并凝练 Profile。
 这样无论从 chat / skill / web 哪个入口进来，逻辑都是一致的。
 
@@ -96,7 +96,11 @@ def _proxy_env() -> dict[str, str]:
 
 
 def _run_via_openclaw(message: str, timeout: int = 300) -> int:
-    """统一通过 OpenClaw agent 执行。"""
+    """兼容旧入口名称，按所选 AgentBackend 执行。"""
+    from easel.agents import AgentService
+    from easel.agents.cli import run_once
+    if AgentService(PROJECT_ROOT).backend_for() != "openclaw":
+        return run_once(PROJECT_ROOT, message, timeout)
     session_key = f"skill-{int(time.time() * 1000)}"
 
     cmd = openclaw_base_cmd() + [
