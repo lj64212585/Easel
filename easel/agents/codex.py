@@ -6,6 +6,7 @@ import json
 from .base import AgentBackend, AgentError
 from .config import AgentConfig, context
 from .rpc import RpcProcess
+from .options import select_model, select_effort
 
 
 class CodexBackend(AgentBackend):
@@ -34,10 +35,53 @@ class CodexBackend(AgentBackend):
         authenticated = bool(account)
         return {"ready": authenticated, "authStatus": "authenticated" if authenticated else "required",
                 "authMode": account.get("type") if account else None,
-                "detail": "已连接 Codex，认证由本地 CLI 管理" if authenticated else "请先运行 python -m easel agent login codex"}
+                "detail": "已连接 Codex，认证由本地 CLI 管理" if authenticated else f"请先运行：{self.config.login_hint('codex')}"}
+
+    async def discover(self, model=""):
+        if not self.rpc:
+            await self.connect()
+        rows, cursor = [], None
+        cursors = set()
+        while True:
+            result = await self.rpc.request("model/list", {"limit": 100, "includeHidden": False, "cursor": cursor})
+            rows.extend(row for row in result.get("data", []) if not row.get("hidden"))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+            if cursor in cursors:
+                raise AgentError("Codex 模型列表分页重复，请更新 CLI 后重试")
+            cursors.add(cursor)
+        configured = {}
+        try:
+            configured = (await self.rpc.request("config/read", {"cwd": str(self.config.root), "includeLayers": False})).get("config", {})
+        except AgentError:
+            pass  # Older CLIs still advertise model defaults in model/list.
+        models = [{"id": row["model"], "name": row.get("displayName") or row["model"],
+                   "description": row.get("description", ""),
+                   "reasoningOptions": [{"id": opt["reasoningEffort"], "name": opt["reasoningEffort"],
+                                         "description": opt.get("description", "")}
+                                        for opt in row.get("supportedReasoningEfforts", [])],
+                   "defaultReasoningEffort": row.get("defaultReasoningEffort", "")}
+                  for row in rows]
+        default = configured.get("model") or next((r["model"] for r in rows if r.get("isDefault")), "")
+        # Custom models are also a CLI-reported choice; capabilities may be absent.
+        if default and default not in {row["id"] for row in models}:
+            models.append({"id": default, "name": default + "（CLI 配置）", "reasoningOptions": []})
+        selected = model or default
+        choice = next((row for row in models if row["id"] == selected), {})
+        options = choice.get("reasoningOptions", [])
+        effort = choice.get("defaultReasoningEffort", "")
+        configured_effort = configured.get("model_reasoning_effort")
+        if selected == default and configured_effort in {o["id"] for o in options}:
+            effort = configured_effort
+        return {"models": models, "defaultModel": default, "selectedModel": selected,
+                "reasoningOptions": options, "defaultReasoningEffort": effort}
 
     async def run(self, request, native_id, emit, ask, save_session):
         await self.connect()
+        catalog = await self.discover(request.model or "")
+        model = select_model(catalog, request.model or "")
+        effort = select_effort(catalog, request.reasoning_effort or "")
         self.done = asyncio.get_running_loop().create_future()
         self.native_id = native_id
         self.seen = {}
@@ -45,8 +89,8 @@ class CodexBackend(AgentBackend):
         self.rpc.on_request = lambda method, params: self._request(method, params, ask)
         params = {"cwd": str(self.config.root), "approvalPolicy": "on-request",
                   "sandbox": "workspace-write", "developerInstructions": context(self.config.root)}
-        if request.model:
-            params["model"] = request.model
+        if model:
+            params["model"] = model
         if native_id:
             params["threadId"] = native_id
         result = await self.rpc.request("thread/resume" if native_id else "thread/start", params, timeout=60)
@@ -55,6 +99,7 @@ class CodexBackend(AgentBackend):
         emit("activity", "Codex 正在处理…")
         result = await self.rpc.request("turn/start", {
             "threadId": self.native_id, "input": [{"type": "text", "text": request.message}],
+            **({"model": model} if model else {}), **({"effort": effort} if effort else {}),
         }, timeout=60)
         self.turn_id = result["turn"]["id"]
         await self.rpc.wait_for(self.done)

@@ -8,6 +8,26 @@ codex = "app-server" in sys.argv
 scenario = os.environ.get("EASEL_TEST_SCENARIO", "normal")
 native = "native-codex" if codex else "native-codebuddy"
 pending = None
+selected_model = "fake-fast"
+
+
+def model_rows():
+    return [{"model": "fake-fast", "displayName": "Fast", "isDefault": True,
+             "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "medium"}],
+             "defaultReasoningEffort": "low"},
+            {"model": "fake-deep", "displayName": "Deep", "isDefault": False,
+             "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "max"}],
+             "defaultReasoningEffort": "high"}]
+
+
+def acp_config():
+    levels = ["low", "medium"] if selected_model == "fake-fast" else ["high", "max"]
+    if scenario == "boolean":
+        return [{"id": "thinking", "category": "thought_level", "type": "boolean", "currentValue": False}]
+    return [{"id": "model", "category": "model", "type": "select", "currentValue": selected_model,
+             "options": [{"value": row["model"], "name": row["displayName"]} for row in model_rows()]},
+            {"id": "thought", "category": "thought_level", "type": "select", "currentValue": levels[0],
+             "options": [{"value": level, "name": level} for level in levels]}]
 
 
 def send(data):
@@ -43,6 +63,15 @@ for line in sys.stdin:
         result(rid, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}})
     elif method == "account/read":
         result(rid, {"account": {"type": "chatgpt"}})
+    elif method == "model/list":
+        rows = model_rows()
+        if scenario == "paged":
+            second = msg["params"].get("cursor") == "page2"
+            result(rid, {"data": rows[1:] if second else rows[:1], "nextCursor": None if second else "page2"})
+        else:
+            result(rid, {"data": rows, "nextCursor": None})
+    elif method == "config/read":
+        result(rid, {"config": {"model": "fake-fast", "model_reasoning_effort": "low"}})
     elif method in ("thread/start", "thread/resume"):
         result(rid, {"thread": {"id": native}})
     elif method in ("session/new", "session/load"):
@@ -51,9 +80,17 @@ for line in sys.stdin:
             continue
         if method == "session/load":
             notification("session/update", {"sessionId": native, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "旧消息不可重复显示"}}})
-        result(rid, {"sessionId": native})
+        result(rid, {"sessionId": native, "configOptions": acp_config()})
     elif method == "session/set_model":
+        selected_model = msg["params"]["modelId"]
         result(rid, {})
+    elif method == "session/set_config_option":
+        if isinstance(msg["params"]["value"], bool) and msg["params"].get("type") != "boolean":
+            send({"id": rid, "error": {"code": -32602, "message": "boolean type tag is required"}})
+            continue
+        if msg["params"]["configId"] == "model":
+            selected_model = msg["params"]["value"]
+        result(rid, {"configOptions": acp_config()})
     elif method in ("turn/start", "session/prompt"):
         if codex:
             result(rid, {"turn": {"id": "turn-1", "status": "inProgress"}})

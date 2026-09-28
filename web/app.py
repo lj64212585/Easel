@@ -42,7 +42,6 @@ if str(PROJECT_ROOT / "scripts") not in sys.path:
 
 from easel.openclaw_cmd import openclaw_base_cmd
 from easel.agents import AgentError, AgentRequest, AgentService
-from easel.trend_sources import fetch_direct_trends, make_opener
 from easel.persona import load_profile_text, persona_prefix, chat_turn_message, profile_exists, _FILE_ORDER
 from easel.timeouts import TIMEOUT_CHAT, TIMEOUT_DIRECT, TIMEOUT_PRODUCE
 
@@ -857,9 +856,10 @@ def _api_spec_status(skill: str, env: dict[str, str]) -> dict:
     }
 
 
-def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | None = None) -> str:
+def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | None = None,
+                   backend: str | None = None, model: str | None = None, reasoning_effort: str | None = None) -> str:
     sk = session_id or f'web-{int(time.time() * 1000)}'
-    if _agent_backend_for(sk) != "openclaw":
+    if (backend or _agent_backend_for(sk)) != "openclaw":
         # Background profile/skill jobs run on their own event loop. Interactive
         # permissions must be answered in streaming chat, never auto-approved.
         service = AgentService(PROJECT_ROOT)
@@ -868,7 +868,7 @@ def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | No
             raise AgentError("此任务需要交互确认，请在对话页发送同一任务并回答许可卡片")
         async def run():
             try:
-                await service.run(AgentRequest(sk, msg, timeout),
+                await service.run(AgentRequest(sk, msg, timeout, model, backend, reasoning_effort),
                                   lambda kind, data: chunks.append(str(data)) if kind == "token" else None,
                                   ask=no_interaction)
                 return "".join(chunks) or "（无输出）"
@@ -1072,15 +1072,31 @@ async def api_agent_settings():
 class AgentSettingsRequest(BaseModel):
     backend: str
     model: str = ""
+    reasoningEffort: str = ""
+    makeDefault: bool = True
 
 
 @app.post("/api/agent/settings")
 async def api_agent_settings_save(req: AgentSettingsRequest):
     try:
-        AGENTS.config.save(req.backend, req.model.strip())
-        return AGENTS.status()
+        return await AGENTS.configure(req.backend, req.model.strip(), req.reasoningEffort,
+                                      make_default=req.makeDefault)
     except AgentError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/agent/options/{backend}")
+async def api_agent_options(backend: str, model: str = "", refresh: bool = False):
+    try:
+        return await AGENTS.discover(backend, model, refresh=refresh)
+    except AgentError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/agent/session/{session_id}")
+async def api_agent_selection(session_id: str):
+    _agent_backend_for(session_id)  # Migrate legacy sessions before reading.
+    return AGENTS.selection(session_id)
 
 
 @app.post("/api/agent/probe")
@@ -1787,6 +1803,9 @@ class ChatRequest(BaseModel):
     sessionId: str | None = None
     turnId: str | None = None
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    backend: str | None = None
+    model: str | None = None
+    reasoningEffort: str | None = None
 
 
 def _attachment_scope(session_id: str) -> str:
@@ -2069,6 +2088,19 @@ def _agent_backend_for(session_id: str | None = None) -> str:
     return AGENTS.backend_for(session_id)
 
 
+def _requested_agent(req: ChatRequest) -> str:
+    current = _agent_backend_for(req.sessionId)
+    if req.backend and req.backend not in ("openclaw", "codex", "codebuddy"):
+        raise HTTPException(400, "不支持的 Agent 后端")
+    saved = AGENTS.config.session(req.sessionId) if req.sessionId else {}
+    if req.backend and saved.get("backend") and req.backend != saved["backend"]:
+        raise HTTPException(409, "切换 Agent 请新建对话，原会话已保留")
+    backend = req.backend or current
+    if backend == "openclaw" and (req.model or req.reasoningEffort):
+        raise HTTPException(400, "OpenClaw 的模型与思考深度请在网关配置中修改")
+    return backend
+
+
 async def _local_agent_stream(req):
     message = _chat_message(req)
     sk = req.sessionId or uuid.uuid4().hex
@@ -2084,7 +2116,7 @@ async def _local_agent_stream(req):
         return await api_chat_job_stream(turn_id)
     if sk in _LOCAL_AGENT_TASKS:
         raise HTTPException(409, "此会话上一轮仍在运行，请等待结束或停止")
-    backend = _agent_backend_for(sk)
+    backend = _requested_agent(req)
     AGENTS.bind(sk, backend)
     try:
         with meta.open("x", encoding="utf-8") as f:
@@ -2120,7 +2152,7 @@ async def _local_agent_stream(req):
     async def supervisor():
         clean_end, reason = False, "error"
         try:
-            await AGENTS.run(AgentRequest(sk, message, TIMEOUT_CHAT), emit)
+            await AGENTS.run(AgentRequest(sk, message, TIMEOUT_CHAT, req.model, backend, req.reasoningEffort), emit)
             clean_end, reason = True, "completed"
         except asyncio.CancelledError:
             reason = "user_stopped"
@@ -2212,7 +2244,7 @@ async def api_chat_stream(req: ChatRequest):
     记下该文件尾偏移、实时 tail 之后追加的行，用 runId 闩锁隔离本轮，把 assistant_text_stream 的
     token delta 转成 SSE `token`、thinking delta 转成 `thinking`。stdout 仅留作错误/兜底。
     """
-    if _agent_backend_for(req.sessionId) != "openclaw":
+    if _requested_agent(req) != "openclaw":
         return await _local_agent_stream(req)
     if req.sessionId:
         AGENTS.bind(req.sessionId, "openclaw")
@@ -2903,7 +2935,8 @@ async def api_chat(req: ChatRequest):
     message = _chat_message(req)
     loop = asyncio.get_event_loop()
     # chat 可能中途触发制作层长任务 → 用 TIMEOUT_CHAT，与流式 /api/chat/stream 一致（勿用 300s）
-    result = await loop.run_in_executor(None, run_agent_sync, message, TIMEOUT_CHAT, req.sessionId)
+    result = await loop.run_in_executor(None, run_agent_sync, message, TIMEOUT_CHAT, req.sessionId,
+                                       _requested_agent(req), req.model, req.reasoningEffort)
     return {"response": result}
 
 

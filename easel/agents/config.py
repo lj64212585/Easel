@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -49,19 +50,29 @@ class AgentConfig:
         if backend not in BACKENDS:
             raise AgentError(f"不支持的 Agent 后端：{backend}")
         return {"backend": backend, "models": data.get("models", {}),
+                "reasoningEfforts": data.get("reasoningEfforts", {}),
                 "environmentOverride": bool(os.environ.get("EASEL_AGENT_BACKEND"))}
 
-    def save(self, backend: str, model: str = "") -> dict:
+    def save(self, backend: str, model: str = "", reasoning_effort: str | None = None,
+             *, make_default: bool = True) -> dict:
         if backend not in BACKENDS:
             raise AgentError("不支持的 Agent 后端")
         if len(model) > 150 or any(c.isspace() for c in model):
             raise AgentError("模型名称不能包含空白，且不得超过 150 字符")
+        if reasoning_effort is not None and (len(reasoning_effort) > 150 or any(c.isspace() for c in reasoning_effort)):
+            raise AgentError("无效的思考深度")
         override = os.environ.get("EASEL_AGENT_BACKEND")
-        if override and override != backend:
+        if make_default and override and override != backend:
             raise AgentError("EASEL_AGENT_BACKEND 固定了当前后端，请先移除该环境变量并重启")
         data = self.settings()
-        data["backend"] = backend
+        if make_default:
+            data["backend"] = backend
+        elif override:
+            # Saving another agent must not persist the environment override.
+            data["backend"] = read_json(self.directory / "config.json").get("backend", "openclaw")
         data["models"][backend] = model
+        if reasoning_effort is not None:
+            data["reasoningEfforts"][backend] = reasoning_effort
         data.pop("environmentOverride", None)
         atomic_json(self.directory / "config.json", data)
         return self.settings()
@@ -110,14 +121,22 @@ class AgentConfig:
             ]
         for candidate in candidates:
             if candidate and Path(candidate).is_file():
+                candidate = os.path.abspath(candidate)
                 # JS entrypoints can also be explicitly selected without a shell.
                 if candidate.endswith((".js", ".mjs", ".cjs")):
                     node = shutil.which("node")
                     if node:
-                        return [node, candidate]
+                        return [os.path.abspath(node), candidate]
                 if os.access(candidate, os.X_OK):
                     return [candidate]
         raise AgentError(f"未找到 {BACKENDS[backend]} CLI；请安装并登录，或设置 EASEL_{backend.upper()}_BIN")
+
+    def login_hint(self, backend: str) -> str:
+        command = self.command(backend) + (["login"] if backend == "codex" else [])
+        if os.name == "nt":
+            # PowerShell requires the call operator for quoted executable paths.
+            return "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in command)
+        return shlex.join(command)
 
     def environment(self) -> dict[str, str]:
         env = os.environ.copy()

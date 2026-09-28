@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import EnvBoard from './EnvBoard';
 import AgentBackendPanel from './AgentBackendPanel';
+import type { AgentBackendPanelHandle } from './AgentBackendPanel';
 import type { JobView } from './EnvBoard';
 import {
   fetchEnvTools, startEnvInstall, fetchEnvJob,
@@ -60,6 +61,8 @@ export default function SettingsPanel({ onClose }: Props) {
   // ── 环境安装（引擎真实数据） ──────────────────────────────
   const [tools, setTools] = useState<EnvTool[]>([]);
   const [agentBackend, setAgentBackend] = useState('openclaw');
+  const [agentBusy, setAgentBusy] = useState(true);
+  const agentPanel = useRef<AgentBackendPanelHandle>(null);
   const [python, setPython] = useState('');
   const [envLoading, setEnvLoading] = useState(true);
   const [envError, setEnvError] = useState('');
@@ -196,27 +199,35 @@ export default function SettingsPanel({ onClose }: Props) {
   const [savedNote, setSavedNote] = useState('');
 
   const saveCurrent = useCallback(async () => {
-    const rows = chan === 'chat' ? chatRows : chan === 'transcribe' ? transRows : (mediaRows[chan] || []);
-    const payload = rows
-      .filter((r) => r.slot)
-      .map((r) => ({
-        slot: r.slot as string,
-        name: r.slot === 'custom' ? r.name.trim().toLowerCase() : '',
-        // 后端在这些字段里塞的是展示占位（'官方'/'（未配置）'/'本机'/'—'），不是真值：
-        // 原样回传会被后端的 Base URL 校验打成 400，导致该行永远保存不了。
-        model: PLACEHOLDERS.has(r.model) ? '' : r.model,
-        baseUrl: PLACEHOLDERS.has(r.baseUrl) ? '' : r.baseUrl,
-        key: r.keyNew || '',
-        key2: r.keyNew2 || '',
-        primary: r.role === '主',
-      }));
-    if (!payload.length) {
-      setSavedNote('当前通道没有可保存的配置');
-      return;
-    }
     setSaving(true);
     setSavedNote('');
     try {
+      if (chan === 'chat') {
+        if (!agentPanel.current) throw new Error('执行助手配置尚未加载，请稍后重试');
+        await agentPanel.current.saveDefaults();
+        if (agentBackend !== 'openclaw') {
+          setSavedNote('✓ 已保存执行助手默认配置');
+          return;
+        }
+      }
+      const rows = chan === 'chat' ? chatRows : chan === 'transcribe' ? transRows : (mediaRows[chan] || []);
+      const payload = rows
+        .filter((r) => r.slot)
+        .map((r) => ({
+          slot: r.slot as string,
+          name: r.slot === 'custom' ? r.name.trim().toLowerCase() : '',
+          // 后端在这些字段里塞的是展示占位（'官方'/'（未配置）'/'本机'/'—'），不是真值：
+          // 原样回传会被后端的 Base URL 校验打成 400，导致该行永远保存不了。
+          model: PLACEHOLDERS.has(r.model) ? '' : r.model,
+          baseUrl: PLACEHOLDERS.has(r.baseUrl) ? '' : r.baseUrl,
+          key: r.keyNew || '',
+          key2: r.keyNew2 || '',
+          primary: r.role === '主',
+        }));
+      if (!payload.length) {
+        setSavedNote('当前通道没有可保存的配置');
+        return;
+      }
       const d = await fetchWithRetry(() => saveModelConfig(chan, payload), 3, 20000);
       setChatRows(d.channels.chat.rows || []);
       setTransRows(d.channels.transcribe.rows || []);
@@ -234,7 +245,7 @@ export default function SettingsPanel({ onClose }: Props) {
       setSaving(false);
       setTimeout(() => setSavedNote(''), 6000);
     }
-  }, [chan, chatRows, transRows, mediaRows, refreshEnv]);
+  }, [chan, agentBackend, chatRows, transRows, mediaRows, refreshEnv]);
 
   // Esc 关闭
   useEffect(() => {
@@ -437,7 +448,7 @@ export default function SettingsPanel({ onClose }: Props) {
             <button
               className="btn btn-sm btn-primary"
               onClick={() => void saveCurrent()}
-              disabled={saving || sec !== 'model' || (chan === 'chat' && agentBackend !== 'openclaw')}
+              disabled={saving || sec !== 'model' || (chan === 'chat' && agentBusy)}
             >
               {saving ? '保存中…' : '保存配置'}
             </button>
@@ -479,7 +490,7 @@ export default function SettingsPanel({ onClose }: Props) {
 
                 {chan === 'chat' && (
                   <section className="st-panel active">
-                    <AgentBackendPanel onBackendChange={setAgentBackend} />
+                    <AgentBackendPanel ref={agentPanel} onBackendChange={setAgentBackend} onBusyChange={setAgentBusy} />
                     {agentBackend === 'openclaw' && <>
                     <div className="panel-top">
                       <span className={`pill ${chatOk ? 'ok' : 'off'}`}><span className="dot" />{chatOk ? '主通道在线' : '未配置'}</span>

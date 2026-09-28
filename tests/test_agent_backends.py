@@ -263,7 +263,7 @@ def test_codebuddy_probe_reports_login_without_sending_prompt(service, monkeypat
     async def run():
         result = await service.probe("codebuddy")
         assert not result["ready"] and result["authStatus"] == "required"
-        assert "agent login codebuddy" in result["detail"]
+        assert service.config.login_hint("codebuddy") in result["detail"]
         service.config.save("codebuddy")
         with pytest.raises(AgentError, match="尚未登录"):
             await service.run(AgentRequest("needs-login", "hello", 5), lambda *_: None)
@@ -285,3 +285,140 @@ def test_login_uses_resolved_command_and_inherits_terminal(service, monkeypatch,
     command, kwargs = calls[0]
     assert command == [sys.executable, str(PEER)] + (["login"] if backend == "codex" else [])
     assert "capture_output" not in kwargs and "shell" not in kwargs
+
+
+@pytest.mark.parametrize("backend", ["codex", "codebuddy"])
+def test_catalog_tracks_model_specific_efforts_and_never_prompts(service, backend):
+    async def run():
+        catalog = await service.discover(backend)
+        assert catalog["available"] and catalog["defaultModel"] == "fake-fast"
+        assert [m["id"] for m in catalog["models"]] == ["fake-fast", "fake-deep"]
+        assert [o["id"] for o in catalog["reasoningOptions"]] == ["low", "medium"]
+        deep = await service.discover(backend, "fake-deep")
+        assert [o["id"] for o in deep["reasoningOptions"]] == ["high", "max"]
+        assert deep["defaultReasoningEffort"] == "high"
+        assert deep["defaultModel"] == "fake-fast"
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    assert not any(r.get("method") in ("session/prompt", "turn/start") for r in records)
+
+
+def test_codex_catalog_paginates_and_coalesces_parallel_reads(service, monkeypatch):
+    monkeypatch.setenv("EASEL_TEST_SCENARIO", "paged")
+    async def run():
+        first, second = await asyncio.gather(service.discover("codex"), service.discover("codex"))
+        assert len(first["models"]) == 2 and first == second
+        assert await service.discover("codex") == first
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    assert sum(r.get("method") == "initialize" for r in records) == 1
+    assert sum(r.get("method") == "model/list" for r in records) == 2
+
+
+def test_multiple_agent_defaults_are_independent_and_do_not_switch_active_backend(service, monkeypatch):
+    async def run():
+        await service.configure("codex", "fake-fast", "medium")
+        await service.configure("codebuddy", "fake-deep", "max")
+        settings = service.config.settings()
+        assert settings["backend"] == "codex"
+        assert settings["models"] == {"codex": "fake-fast", "codebuddy": "fake-deep"}
+        assert settings["reasoningEfforts"] == {"codex": "medium", "codebuddy": "max"}
+        await service.configure("codebuddy", "fake-deep", "max", make_default=True)
+        assert service.backend_for() == "codebuddy"
+        monkeypatch.setenv("EASEL_AGENT_BACKEND", "codex")
+        await service.configure("codebuddy", "fake-fast", "low")
+        assert service.backend_for() == "codex"
+        monkeypatch.delenv("EASEL_AGENT_BACKEND")
+        assert service.backend_for() == "codebuddy"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["codex", "codebuddy"])
+def test_turn_selection_reaches_native_cli_and_can_reset_to_default(service, backend):
+    async def run():
+        # Explicit per-chat selection overrides the global default.
+        await service.run(AgentRequest("selected", "first", 5, "fake-deep", backend, "max"), lambda *_: None)
+        saved = service.config.session("selected")
+        assert (saved["backend"], saved["model"], saved["reasoningEffort"]) == (backend, "fake-deep", "max")
+        await service.run(AgentRequest("selected", "second", 5, "fake-fast", backend, ""), lambda *_: None)
+        assert service.config.session("selected")["reasoningEffort"] == ""
+        other = "codebuddy" if backend == "codex" else "codex"
+        with pytest.raises(AgentError, match="新建对话"):
+            await service.run(AgentRequest("selected", "cannot switch", 5, backend=other), lambda *_: None)
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    if backend == "codex":
+        turns = [r["params"] for r in records if r.get("method") == "turn/start"]
+        assert [(t["model"], t["effort"]) for t in turns] == [("fake-deep", "max"), ("fake-fast", "low")]
+    else:
+        changes = [r["params"] for r in records if r.get("method") == "session/set_config_option"]
+        assert [(c["configId"], c["value"]) for c in changes] == [("model", "fake-deep"), ("thought", "max"), ("model", "fake-fast"), ("thought", "low")]
+
+
+@pytest.mark.parametrize("backend", ["codex", "codebuddy"])
+@pytest.mark.parametrize("model,effort", [("missing-model", ""), ("fake-fast", "max")])
+def test_invalid_model_or_effort_never_sends_prompt(service, backend, model, effort):
+    async def run():
+        with pytest.raises(AgentError):
+            await service.run(AgentRequest("invalid", "hello", 5, model, backend, effort), lambda *_: None)
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    assert not any(r.get("method") in ("session/prompt", "turn/start") for r in records)
+
+
+def test_unauthenticated_catalog_has_no_invented_choices(service, monkeypatch):
+    monkeypatch.setenv("EASEL_TEST_SCENARIO", "unauthenticated")
+    async def run():
+        result = await service.discover("codebuddy")
+        assert not result["available"] and result["models"] == [] and result["reasoningOptions"] == []
+        assert "尚未登录" in result["detail"]
+    asyncio.run(run())
+
+
+def test_acp_grouped_models_and_boolean_thinking_follow_advertised_config():
+    from easel.agents.options import acp_catalog
+    result = acp_catalog({"configOptions": [
+        {"id": "model", "category": "model", "type": "select", "currentValue": "m",
+         "options": [{"group": "models", "options": [{"value": "m", "name": "Model"}]}]},
+        {"id": "thinking", "type": "boolean", "category": "thought_level", "currentValue": False},
+    ]})
+    assert result["models"][0]["id"] == "m"
+    assert result["reasoningConfigId"] == "thinking" and result["defaultReasoningEffort"] == "false"
+    assert [r["id"] for r in result["reasoningOptions"]] == ["true", "false"]
+
+
+def test_web_chat_selection_overrides_default_and_is_recoverable(web_service):
+    web = web_service
+    async def run():
+        req = web.ChatRequest(message="hello", sessionId="choice-web", turnId="choice-turn",
+                              backend="codebuddy", model="fake-deep", reasoningEffort="max")
+        response = await web.api_chat_stream(req)
+        events = [e async for e in response.body_iterator]
+        assert events[-1]["event"] == "done"
+        assert await web.api_agent_selection("choice-web") == {"backend": "codebuddy", "model": "fake-deep", "reasoningEffort": "max"}
+        with pytest.raises(web.HTTPException) as error:
+            await web.api_chat_stream(web.ChatRequest(message="hello", sessionId="choice-web", backend="codex"))
+        assert error.value.status_code == 409
+        assert web.AGENTS.backend_for() == "codex"
+    asyncio.run(run())
+
+
+def test_cli_switch_preserves_each_agents_defaults(service, monkeypatch):
+    from types import SimpleNamespace
+    from easel.agents import cli
+    service.config.save("codebuddy", "fake-deep", "max", make_default=False)
+    monkeypatch.setattr(cli, "AgentService", lambda _: service)
+    assert cli.cmd_agent(SimpleNamespace(action="use", backend="codebuddy", model=None)) == 0
+    assert service.config.settings()["models"]["codebuddy"] == "fake-deep"
+    assert service.config.settings()["reasoningEfforts"]["codebuddy"] == "max"
+
+
+@pytest.mark.parametrize("effort", ["true", "false"])
+def test_codebuddy_boolean_thinking_uses_typed_acp_value(service, monkeypatch, effort):
+    monkeypatch.setenv("EASEL_TEST_SCENARIO", "boolean")
+    async def run():
+        await service.run(AgentRequest("boolean", "hello", 5, backend="codebuddy", reasoning_effort=effort), lambda *_: None)
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    change = next(r["params"] for r in records if r.get("method") == "session/set_config_option")
+    assert change == {"sessionId": "native-codebuddy", "configId": "thinking", "type": "boolean", "value": effort == "true"}
