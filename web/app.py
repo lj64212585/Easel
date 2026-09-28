@@ -10,6 +10,7 @@ else:
 import hashlib
 import ipaddress
 import json
+import logging
 import re
 import shutil
 import socket
@@ -38,6 +39,7 @@ if str(PROJECT_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from easel.openclaw_cmd import openclaw_base_cmd
+from easel.trend_sources import fetch_direct_trends, make_opener
 from easel.persona import load_profile_text, persona_prefix, chat_turn_message, profile_exists, _FILE_ORDER
 from easel.timeouts import TIMEOUT_CHAT, TIMEOUT_DIRECT, TIMEOUT_PRODUCE
 try:
@@ -3705,7 +3707,7 @@ _TREND_CACHE: dict[str, tuple[float, list]] = {}
 
 def _http_get_json(url: str, timeout: int = 8):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Easel"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with make_opener().open(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
@@ -3730,6 +3732,8 @@ def _parse_hot(obj: dict) -> list[dict]:
 
 
 def _fetch_platform(pf: str) -> list[dict]:
+    if pf not in TREND_SOURCES:
+        return []
     primary, backup = TREND_SOURCES.get(pf, (None, None))
     for url in (primary, backup):
         if not url:
@@ -3740,30 +3744,40 @@ def _fetch_platform(pf: str) -> list[dict]:
                 return items
         except Exception:
             continue
+    try:
+        items = fetch_direct_trends(pf)
+        if items:
+            return items
+        logging.getLogger(__name__).warning("热点 %s：平台直抓返回空数据", pf)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("热点 %s：平台直抓失败（%s）", pf, type(exc).__name__)
     return []
 
 
 @app.get("/api/trends")
 async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
-    pfs = [p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES]
+    pfs = list(dict.fromkeys(p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES))
     now = time.time()
     loop = asyncio.get_event_loop()
-    result = []
-    for pf in pfs:
+
+    async def load_platform(pf: str) -> dict:
         c = _TREND_CACHE.get(pf)
         if c and now - c[0] < 300:
             items = c[1]
         else:
             items = await loop.run_in_executor(None, _fetch_platform, pf)
             if items:
-                _TREND_CACHE[pf] = (now, items)
+                _TREND_CACHE[pf] = (time.time(), items)
             elif c:
                 items = c[1]
-        result.append({
+        return {
             "platform": pf,
             "label": TREND_LABELS.get(pf, pf),
             "items": items[:max(1, min(limit, 30))],
-        })
+        }
+
+    # 每个平台内部顺序回退，各平台并发，避免超时逐个平台累加。
+    result = await asyncio.gather(*(load_platform(pf) for pf in pfs))
     return {"trends": result, "updated": int(now)}
 
 
