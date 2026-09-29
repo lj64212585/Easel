@@ -34,14 +34,14 @@ export default function ChatAgentControls({ sessionId, value, disabled, hasMessa
       <label>Agent<select aria-label="对话 Agent" value={value?.backend || ''} disabled={disabled || !settings || !value}
         onChange={(e) => {
           const backend = e.target.value;
-          onChange({ backend, model: settings?.models[backend] || '', reasoningEffort: settings?.reasoningEfforts[backend] || '' }, true);
+          onChange({ backend, model: settings?.models[backend] || '', reasoningEffort: settings?.reasoningEfforts[backend] || '', permissionMode: settings?.permissionModes?.[backend] || '' }, true);
         }}>
         {!value && <option value="">读取配置…</option>}
         {settings?.backends.map((a) => <option key={a.id} value={a.id}>{a.name}{a.installed ? '' : '（未检测到 CLI）'}</option>)}
       </select></label>
       {value && <AgentModelFields value={value} onChange={(next) => onChange(next)} disabled={disabled} />}
     </div>
-    {hasMessages && <div className="agent-switch-hint">模型与思考深度对下一轮生效；切换 Agent 会新建对话。</div>}
+    {hasMessages && <div className="agent-switch-hint">模型、思考深度与权限对下一轮生效；切换 Agent 会新建对话。</div>}
     {error && <div role="alert" className="agent-options-note err">{error}</div>}
   </div>;
 }

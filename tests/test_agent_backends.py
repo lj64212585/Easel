@@ -395,7 +395,7 @@ def test_web_chat_selection_overrides_default_and_is_recoverable(web_service):
         response = await web.api_chat_stream(req)
         events = [e async for e in response.body_iterator]
         assert events[-1]["event"] == "done"
-        assert await web.api_agent_selection("choice-web") == {"backend": "codebuddy", "model": "fake-deep", "reasoningEffort": "max"}
+        assert await web.api_agent_selection("choice-web") == {"backend": "codebuddy", "model": "fake-deep", "reasoningEffort": "max", "permissionMode": ""}
         with pytest.raises(web.HTTPException) as error:
             await web.api_chat_stream(web.ChatRequest(message="hello", sessionId="choice-web", backend="codex"))
         assert error.value.status_code == 409
@@ -422,3 +422,106 @@ def test_codebuddy_boolean_thinking_uses_typed_acp_value(service, monkeypatch, e
     records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
     change = next(r["params"] for r in records if r.get("method") == "session/set_config_option")
     assert change == {"sessionId": "native-codebuddy", "configId": "thinking", "type": "boolean", "value": effort == "true"}
+
+
+@pytest.mark.parametrize("mode,policy", [("read-only", "never"), ("workspace-write", "on-request"), ("danger-full-access", "never")])
+def test_codex_permissions_apply_on_start_resume_and_reset(service, mode, policy):
+    async def run():
+        for permission in (mode, "read-only", ""):
+            await service.run(AgentRequest("permissions", "hello", 5, permission_mode=permission), lambda *_: None)
+        assert service.config.session("permissions")["permissionMode"] == ""
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    starts = [r for r in records if r.get("method") in ("thread/start", "thread/resume")]
+    assert [r["method"] for r in starts] == ["thread/start", "thread/resume", "thread/resume"]
+    assert [(r["params"]["sandbox"], r["params"]["approvalPolicy"]) for r in starts] == [
+        (mode, policy), ("read-only", "never"), ("workspace-write", "on-request")]
+
+
+@pytest.mark.parametrize("scenario", ["normal", "permission_config"])
+def test_codebuddy_native_permissions_apply_and_reset_after_resume(service, monkeypatch, scenario):
+    monkeypatch.setenv("EASEL_TEST_SCENARIO", scenario)
+    async def run():
+        catalog = await service.discover("codebuddy")
+        assert "delegate" not in {row["id"] for row in catalog["permissionOptions"]}
+        assert catalog["defaultPermissionMode"] == "default"
+        for permission in ("fullAccess", "plan", ""):
+            await service.run(AgentRequest("permissions", "hello", 5, backend="codebuddy", permission_mode=permission), lambda *_: None)
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    if scenario == "permission_config":
+        modes = [r["params"]["value"] for r in records if r.get("method") == "session/set_config_option" and r["params"]["configId"] == "mode"]
+    else:
+        modes = [r["params"]["modeId"] for r in records if r.get("method") == "session/set_mode"]
+    assert modes == ["fullAccess", "plan", "default"]
+    # Every prompt must be preceded by a native mode application, including a reset.
+    methods = [r.get("method") for r in records]
+    for index, method in enumerate(methods):
+        if method == "session/prompt":
+            assert methods[index - 1] == ("session/set_config_option" if scenario == "permission_config" else "session/set_mode")
+
+
+@pytest.mark.parametrize("backend,invalid", [("codex", "fullAccess"), ("codebuddy", "danger-full-access"), ("codebuddy", "delegate")])
+def test_invalid_permissions_never_send_work_or_save_defaults(service, backend, invalid):
+    async def run():
+        with pytest.raises(AgentError, match="不支持权限"):
+            await service.configure(backend, permission_mode=invalid)
+        assert backend not in service.config.settings()["permissionModes"]
+        with pytest.raises(AgentError, match="不支持权限"):
+            await service.run(AgentRequest("invalid-permission", "hello", 5, backend=backend, permission_mode=invalid), lambda *_: None)
+    asyncio.run(run())
+    records = [json.loads(line) for line in (service.config.root / "wire.jsonl").read_text().splitlines()]
+    assert not any(r.get("method") in ("turn/start", "session/prompt") for r in records)
+
+
+@pytest.mark.parametrize("backend,elevated", [("codex", "danger-full-access"), ("codebuddy", "fullAccess")])
+def test_new_permission_defaults_do_not_escalate_existing_conversations(service, backend, elevated):
+    async def run():
+        service.config.save(backend)
+        service.bind("legacy", backend)
+        await service.configure(backend, permission_mode=elevated)
+        assert service.selection("legacy")["permissionMode"] == ""
+        assert service.selection("new")["permissionMode"] == elevated
+        await service.run(AgentRequest("legacy", "hello", 5), lambda *_: None)
+        assert service.config.session("legacy")["permissionMode"] == ""
+        await service.run(AgentRequest("new", "hello", 5), lambda *_: None)
+        assert service.config.session("new")["permissionMode"] == elevated
+        await service.configure(backend, permission_mode="")
+        await service.run(AgentRequest("new", "again", 5), lambda *_: None)
+        assert service.selection("new")["permissionMode"] == elevated
+    asyncio.run(run())
+
+
+def test_permission_defaults_survive_model_only_save_and_cli_switch(service, monkeypatch):
+    from types import SimpleNamespace
+    from easel.agents import cli
+    async def run():
+        await service.configure("codex", permission_mode="read-only")
+        await service.configure("codebuddy", permission_mode="plan")
+        await service.configure("codex", "fake-deep", "high")
+    asyncio.run(run())
+    monkeypatch.setattr(cli, "AgentService", lambda _: service)
+    assert cli.cmd_agent(SimpleNamespace(action="use", backend="codebuddy", model=None)) == 0
+    fresh = AgentService(service.config.root)
+    assert fresh.status()["permissionModes"] == {"codex": "read-only", "codebuddy": "plan"}
+
+
+def test_web_permission_settings_and_chat_selection(web_service):
+    web = web_service
+    async def run():
+        settings = await web.api_agent_settings_save(web.AgentSettingsRequest(backend="codex", permissionMode="read-only", makeDefault=False))
+        assert settings["permissionModes"]["codex"] == "read-only"
+        inherited = await web.api_chat_stream(web.ChatRequest(message="hello", sessionId="default-permissions", turnId="default-permission-turn"))
+        inherited_events = [event async for event in inherited.body_iterator]
+        assert not any(event["event"] == "error" for event in inherited_events)
+        assert (await web.api_agent_selection("default-permissions"))["permissionMode"] == "read-only"
+        req = web.ChatRequest(message="hello", sessionId="web-permissions", turnId="permission-turn",
+                              backend="codebuddy", permissionMode="plan")
+        response = await web.api_chat_stream(req)
+        events = [event async for event in response.body_iterator]
+        assert not any(event["event"] == "error" for event in events)
+        assert (await web.api_agent_selection("web-permissions"))["permissionMode"] == "plan"
+        with pytest.raises(web.HTTPException) as error:
+            web._requested_agent(web.ChatRequest(message="hello", backend="openclaw", permissionMode="fullAccess"))
+        assert error.value.status_code == 400
+    asyncio.run(run())

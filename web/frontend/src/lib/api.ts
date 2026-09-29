@@ -36,11 +36,12 @@ export interface AgentSettings {
   backend: string;
   models: Record<string, string>;
   reasoningEfforts: Record<string, string>;
+  permissionModes: Record<string, string>;
   environmentOverride: boolean;
-  backends: { id: string; name: string; installed: boolean; command: string[]; loginCommand: string; model: string; reasoningEffort: string }[];
+  backends: { id: string; name: string; installed: boolean; command: string[]; loginCommand: string; model: string; reasoningEffort: string; permissionMode: string }[];
 }
 
-export interface AgentSelection { backend: string; model: string; reasoningEffort: string; }
+export interface AgentSelection { backend: string; model: string; reasoningEffort: string; permissionMode?: string; }
 export interface AgentOption { id: string; name: string; description?: string; }
 export interface AgentCatalog {
   backend: string;
@@ -50,6 +51,8 @@ export interface AgentCatalog {
   selectedModel: string;
   reasoningOptions: AgentOption[];
   defaultReasoningEffort: string;
+  permissionOptions: AgentOption[];
+  defaultPermissionMode: string;
   detail: string;
 }
 export const fetchAgentOptions = (backend: string, model = '', refresh = false) =>
@@ -58,8 +61,8 @@ export const fetchAgentSelection = (sessionId: string) =>
   request<AgentSelection>(`/api/agent/session/${encodeURIComponent(sessionId)}`);
 
 export const fetchAgentSettings = () => request<AgentSettings>('/api/agent/settings');
-export const saveAgentSettings = (backend: string, model: string, reasoningEffort = '', makeDefault = false) => request<AgentSettings>('/api/agent/settings', {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend, model, reasoningEffort, makeDefault }),
+export const saveAgentSettings = (backend: string, model: string, reasoningEffort = '', makeDefault = false, permissionMode?: string) => request<AgentSettings>('/api/agent/settings', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend, model, reasoningEffort, makeDefault, permissionMode }),
 });
 export const probeAgent = (backend: string) => request<{ ready: boolean; authStatus: string; authMode?: string; detail: string }>('/api/agent/probe', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend }),

@@ -51,16 +51,21 @@ class AgentConfig:
             raise AgentError(f"不支持的 Agent 后端：{backend}")
         return {"backend": backend, "models": data.get("models", {}),
                 "reasoningEfforts": data.get("reasoningEfforts", {}),
+                "permissionModes": data.get("permissionModes", {}),
                 "environmentOverride": bool(os.environ.get("EASEL_AGENT_BACKEND"))}
 
     def save(self, backend: str, model: str = "", reasoning_effort: str | None = None,
-             *, make_default: bool = True) -> dict:
+             *, make_default: bool = True, permission_mode: str | None = None) -> dict:
         if backend not in BACKENDS:
             raise AgentError("不支持的 Agent 后端")
         if len(model) > 150 or any(c.isspace() for c in model):
             raise AgentError("模型名称不能包含空白，且不得超过 150 字符")
         if reasoning_effort is not None and (len(reasoning_effort) > 150 or any(c.isspace() for c in reasoning_effort)):
             raise AgentError("无效的思考深度")
+        if permission_mode is not None and (len(permission_mode) > 150 or any(c.isspace() for c in permission_mode)):
+            raise AgentError("无效的权限模式")
+        if backend == "openclaw" and permission_mode:
+            raise AgentError("OpenClaw 权限由网关管理")
         override = os.environ.get("EASEL_AGENT_BACKEND")
         if make_default and override and override != backend:
             raise AgentError("EASEL_AGENT_BACKEND 固定了当前后端，请先移除该环境变量并重启")
@@ -73,6 +78,8 @@ class AgentConfig:
         data["models"][backend] = model
         if reasoning_effort is not None:
             data["reasoningEfforts"][backend] = reasoning_effort
+        if permission_mode is not None:
+            data["permissionModes"][backend] = permission_mode
         data.pop("environmentOverride", None)
         atomic_json(self.directory / "config.json", data)
         return self.settings()

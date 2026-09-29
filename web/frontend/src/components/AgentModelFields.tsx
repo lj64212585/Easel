@@ -28,8 +28,13 @@ export default function AgentModelFields({ value, onChange, disabled = false, la
   }, [value.backend, value.model, revision]);
   const models = catalog?.models || [];
   const efforts = catalog?.reasoningOptions || [];
+  const permissions = catalog?.permissionOptions || [];
+  const permissionMode = value.permissionMode || '';
+  const permission = permissions.find((p) => p.id === (permissionMode || catalog?.defaultPermissionMode));
+  const defaultPermission = permissions.find((p) => p.id === catalog?.defaultPermissionMode)?.name;
   const badModel = !!value.model && !loading && !!catalog?.available && !models.some((m) => m.id === value.model);
   const badEffort = !!value.reasoningEffort && !loading && !!catalog?.available && !efforts.some((e) => e.id === value.reasoningEffort);
+  const badPermission = !!permissionMode && !loading && !!catalog?.available && !permissions.some((p) => p.id === permissionMode);
   const defaultModel = models.find((m) => m.id === catalog?.defaultModel)?.name || catalog?.defaultModel;
   return <>
     <label>{labelPrefix}模型<select aria-label={`${labelPrefix}模型`} value={value.model}
@@ -46,8 +51,16 @@ export default function AgentModelFields({ value, onChange, disabled = false, la
       {value.reasoningEffort && !efforts.some((e) => e.id === value.reasoningEffort) && <option value={value.reasoningEffort} disabled>{value.reasoningEffort}（待验证）</option>}
       {efforts.map((e) => <option key={e.id} value={e.id} title={e.description}>{effortLabel(e.id, e.name)}</option>)}
     </select></label>
-    {value.backend !== 'openclaw' && <button type="button" className="btn btn-sm agent-refresh" title="重新读取 CLI 模型与思考选项"
+    <label>{labelPrefix}权限<select aria-label={`${labelPrefix}权限`} value={permissionMode} title={permission?.description}
+      disabled={disabled || loading || value.backend === 'openclaw' || (!permissions.length && !permissionMode)}
+      onChange={(e) => onChange({ ...value, permissionMode: e.target.value })}>
+      <option value="">{loading ? '读取中…' : value.backend === 'openclaw' ? '由网关管理' : `默认${defaultPermission ? ` · ${defaultPermission}` : '（由 CLI 管理）'}`}</option>
+      {permissionMode && !permissions.some((p) => p.id === permissionMode) && <option value={permissionMode} disabled>{permissionMode}（待验证）</option>}
+      {permissions.map((p) => <option key={p.id} value={p.id} title={p.description}>{p.name}</option>)}
+    </select></label>
+    {value.backend !== 'openclaw' && <button type="button" className="btn btn-sm agent-refresh" title="重新读取 CLI 模型、思考与权限选项"
       disabled={disabled || loading} onClick={() => setRevision((v) => v + 1)}>刷新选项</button>}
-    {(error || badModel || badEffort) && <div role="status" className="agent-options-note err">{error || '已保存的模型或思考深度当前不可用，请重新选择。'}</div>}
+    {permission?.description && <div className="agent-options-note">{permission.description}</div>}
+    {(error || badModel || badEffort || badPermission) && <div role="status" className="agent-options-note err">{error || '已保存的模型、思考深度或权限当前不可用，请重新选择。'}</div>}
   </>;
 }

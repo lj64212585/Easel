@@ -858,7 +858,8 @@ def _api_spec_status(skill: str, env: dict[str, str]) -> dict:
 
 
 def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | None = None,
-                   backend: str | None = None, model: str | None = None, reasoning_effort: str | None = None) -> str:
+                   backend: str | None = None, model: str | None = None, reasoning_effort: str | None = None,
+                   permission_mode: str | None = None) -> str:
     sk = session_id or f'web-{int(time.time() * 1000)}'
     if (backend or _agent_backend_for(sk)) != "openclaw":
         # Background profile/skill jobs run on their own event loop. Interactive
@@ -869,7 +870,7 @@ def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | No
             raise AgentError("此任务需要交互确认，请在对话页发送同一任务并回答许可卡片")
         async def run():
             try:
-                await service.run(AgentRequest(sk, msg, timeout, model, backend, reasoning_effort),
+                await service.run(AgentRequest(sk, msg, timeout, model, backend, reasoning_effort, permission_mode),
                                   lambda kind, data: chunks.append(str(data)) if kind == "token" else None,
                                   ask=no_interaction)
                 return "".join(chunks) or "（无输出）"
@@ -1075,13 +1076,14 @@ class AgentSettingsRequest(BaseModel):
     model: str = ""
     reasoningEffort: str = ""
     makeDefault: bool = True
+    permissionMode: str | None = None
 
 
 @app.post("/api/agent/settings")
 async def api_agent_settings_save(req: AgentSettingsRequest):
     try:
         return await AGENTS.configure(req.backend, req.model.strip(), req.reasoningEffort,
-                                      make_default=req.makeDefault)
+                                      make_default=req.makeDefault, permission_mode=req.permissionMode)
     except AgentError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1807,6 +1809,7 @@ class ChatRequest(BaseModel):
     backend: str | None = None
     model: str | None = None
     reasoningEffort: str | None = None
+    permissionMode: str | None = None
 
 
 def _attachment_scope(session_id: str) -> str:
@@ -2097,8 +2100,8 @@ def _requested_agent(req: ChatRequest) -> str:
     if req.backend and saved.get("backend") and req.backend != saved["backend"]:
         raise HTTPException(409, "切换 Agent 请新建对话，原会话已保留")
     backend = req.backend or current
-    if backend == "openclaw" and (req.model or req.reasoningEffort):
-        raise HTTPException(400, "OpenClaw 的模型与思考深度请在网关配置中修改")
+    if backend == "openclaw" and (req.model or req.reasoningEffort or req.permissionMode):
+        raise HTTPException(400, "OpenClaw 的模型、思考深度与权限请在网关配置中修改")
     return backend
 
 
@@ -2118,7 +2121,8 @@ async def _local_agent_stream(req):
     if sk in _LOCAL_AGENT_TASKS:
         raise HTTPException(409, "此会话上一轮仍在运行，请等待结束或停止")
     backend = _requested_agent(req)
-    AGENTS.bind(sk, backend)
+    AGENTS.bind(sk, backend, permission_mode=req.permissionMode if req.permissionMode is not None
+                else AGENTS.config.settings()["permissionModes"].get(backend, ""))
     try:
         with meta.open("x", encoding="utf-8") as f:
             json.dump({"sessionId": sk}, f)
@@ -2153,7 +2157,7 @@ async def _local_agent_stream(req):
     async def supervisor():
         clean_end, reason = False, "error"
         try:
-            await AGENTS.run(AgentRequest(sk, message, TIMEOUT_CHAT, req.model, backend, req.reasoningEffort), emit)
+            await AGENTS.run(AgentRequest(sk, message, TIMEOUT_CHAT, req.model, backend, req.reasoningEffort, req.permissionMode), emit)
             clean_end, reason = True, "completed"
         except asyncio.CancelledError:
             reason = "user_stopped"
@@ -2937,7 +2941,7 @@ async def api_chat(req: ChatRequest):
     loop = asyncio.get_event_loop()
     # chat 可能中途触发制作层长任务 → 用 TIMEOUT_CHAT，与流式 /api/chat/stream 一致（勿用 300s）
     result = await loop.run_in_executor(None, run_agent_sync, message, TIMEOUT_CHAT, req.sessionId,
-                                       _requested_agent(req), req.model, req.reasoningEffort)
+                                       _requested_agent(req), req.model, req.reasoningEffort, req.permissionMode)
     return {"response": result}
 
 

@@ -1,5 +1,6 @@
 """Normalize advertised CLI capabilities; never invent model/effort values."""
 from .base import AgentError
+from .permissions import acp_permissions
 
 
 def select_model(catalog: dict, model: str) -> str:
@@ -29,6 +30,8 @@ def acp_choices(option: dict) -> list[dict]:
 
 def acp_catalog(result: dict, model: str = "") -> dict:
     configs = result.get("configOptions") or []
+    permission_option = next((o for o in configs if o.get("category") == "mode" or o.get("id") == "mode"), {})
+    permissions = acp_choices(permission_option) or (result.get("modes") or {}).get("availableModes", [])
     model_option = next((o for o in configs if o.get("category") == "model" or o.get("id") == "model"), {})
     state = result.get("models") or {}
     models = acp_choices(model_option) or [
@@ -45,6 +48,7 @@ def acp_catalog(result: dict, model: str = "") -> dict:
         current = str(current).lower()
     default_model = model_option.get("currentValue") or state.get("currentModelId", "")
     return {"models": models, "defaultModel": default_model, "selectedModel": model or default_model,
+            **acp_permissions(permissions, permission_option.get("id")),
             "reasoningOptions": acp_choices(thought), "defaultReasoningEffort": str(current),
             "reasoningConfigId": thought.get("id"), "reasoningConfigType": thought.get("type"),
             "modelConfigId": model_option.get("id")}
