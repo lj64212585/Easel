@@ -7,6 +7,7 @@ from .base import AgentBackend, AgentError
 from .config import AgentConfig, context
 from .rpc import RpcProcess
 from .options import select_model, select_effort
+from .permissions import CODEX_PERMISSIONS, codex_permissions
 
 
 class CodexBackend(AgentBackend):
@@ -75,6 +76,7 @@ class CodexBackend(AgentBackend):
         if selected == default and configured_effort in {o["id"] for o in options}:
             effort = configured_effort
         return {"models": models, "defaultModel": default, "selectedModel": selected,
+                "permissionOptions": CODEX_PERMISSIONS, "defaultPermissionMode": "workspace-write",
                 "reasoningOptions": options, "defaultReasoningEffort": effort}
 
     async def run(self, request, native_id, emit, ask, save_session):
@@ -87,8 +89,8 @@ class CodexBackend(AgentBackend):
         self.seen = {}
         self.rpc.on_notification = lambda method, params: self._event(method, params, emit)
         self.rpc.on_request = lambda method, params: self._request(method, params, ask)
-        params = {"cwd": str(self.config.root), "approvalPolicy": "on-request",
-                  "sandbox": "workspace-write", "developerInstructions": context(self.config.root)}
+        params = {"cwd": str(self.config.root), **codex_permissions(request.permission_mode or ""),
+                  "developerInstructions": context(self.config.root)}
         if model:
             params["model"] = model
         if native_id:

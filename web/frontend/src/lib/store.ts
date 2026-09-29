@@ -120,6 +120,8 @@ export function loadSessions(): ChatSession[] {
     // 防御：损坏/缺字段的会话（旧版写入或写中断）恢复成可用形态，绝不让渲染期崩。
     return sessions.map((session) => ({
       ...session,
+      // Existing conversations predate permission selection and retain the standard mode.
+      agentSelection: session.agentSelection ? { ...session.agentSelection, permissionMode: session.agentSelection.permissionMode ?? '' } : undefined,
       messages: Array.isArray(session.messages)
         ? session.messages.map((message) => {
             if (message?.role !== 'user' || message.agentContent || !message.content?.includes('【附件素材】')) {

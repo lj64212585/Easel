@@ -14,7 +14,7 @@ function AgentCard({ agent, settings, value, onChange, busy, setBusy, onSaved, o
 }) {
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
-  const dirty = value.model !== agent.model || value.reasoningEffort !== agent.reasoningEffort;
+  const dirty = value.model !== agent.model || value.reasoningEffort !== agent.reasoningEffort || (value.permissionMode || '') !== (agent.permissionMode || '');
   const act = async (action: 'save' | 'default' | 'probe') => {
     setBusy(true); setError(''); setNote('');
     try {
@@ -23,7 +23,7 @@ function AgentCard({ agent, settings, value, onChange, busy, setBusy, onSaved, o
         const detail = result.authMode === 'chatgpt' ? `${result.detail}（ChatGPT 订阅登录）` : result.detail;
         if (result.ready) setNote(detail); else setError(detail);
       } else {
-        const data = await saveAgentSettings(agent.id, value.model, value.reasoningEffort, action === 'default');
+        const data = await saveAgentSettings(agent.id, value.model, value.reasoningEffort, action === 'default', value.permissionMode || '');
         onSaved(data);
         setNote(action === 'default' ? '已设为新对话默认 Agent。' : `已保存 ${agent.name} 默认配置，其他 Agent 配置不变。`);
       }
@@ -75,14 +75,14 @@ export default function AgentBackendPanel({ ref, onBackendChange, onBusyChange }
       if (busy) throw new Error('执行助手正在处理中，请稍后重试');
       const changed = settings.backends.filter((agent) => {
         const value = values[agent.id];
-        return agent.id !== 'openclaw' && value && (value.model !== agent.model || value.reasoningEffort !== agent.reasoningEffort);
+        return agent.id !== 'openclaw' && value && (value.model !== agent.model || value.reasoningEffort !== agent.reasoningEffort || (value.permissionMode || '') !== (agent.permissionMode || ''));
       });
       setBusy(true);
       try {
         for (const agent of changed) {
           const value = values[agent.id];
           try {
-            saved(await saveAgentSettings(agent.id, value.model, value.reasoningEffort));
+            saved(await saveAgentSettings(agent.id, value.model, value.reasoningEffort, false, value.permissionMode || ''));
           } catch (e) {
             throw new Error(`${agent.name}：${e instanceof Error ? e.message : String(e)}`);
           }
@@ -96,7 +96,7 @@ export default function AgentBackendPanel({ ref, onBackendChange, onBusyChange }
       if (active) {
         setSettings(data); onBackendChange(data.backend);
         setValues(Object.fromEntries(data.backends.map((agent) => [agent.id, {
-          backend: agent.id, model: agent.model, reasoningEffort: agent.reasoningEffort,
+          backend: agent.id, model: agent.model, reasoningEffort: agent.reasoningEffort, permissionMode: agent.permissionMode || '',
         }])));
       }
     }).catch((e) => { if (active) setError(String(e)); })

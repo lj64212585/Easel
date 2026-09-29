@@ -17,6 +17,7 @@ class AgentRequest:
     model: str | None = None
     backend: str | None = None
     reasoning_effort: str | None = None
+    permission_mode: str | None = None
 
 
 Emit = Callable[[str, object], None]
@@ -46,5 +47,5 @@ class AgentBackend(ABC):
 
     @abstractmethod
     async def discover(self, model: str = "") -> dict:
-        """Read model and reasoning choices from the CLI, without a prompt."""
+        """Read model, reasoning and permission choices without sending a prompt."""
         ...

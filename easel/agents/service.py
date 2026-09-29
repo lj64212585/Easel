@@ -10,6 +10,7 @@ from .codebuddy import CodeBuddyBackend
 from .codex import CodexBackend
 from .config import AgentConfig, BACKENDS, atomic_json
 from .options import select_model, select_effort
+from .permissions import select_permission
 
 FACTORIES = {"codex": CodexBackend, "codebuddy": CodeBuddyBackend}
 
@@ -26,18 +27,19 @@ class AgentService:
         saved = self.config.session(session_id) if session_id else {}
         return saved.get("backend") or self.config.settings()["backend"]
 
-    def bind(self, session_id: str, backend: str) -> None:
+    def bind(self, session_id: str, backend: str, *, permission_mode: str = "") -> None:
         # Used for the compatibility OpenClaw route as well as native sessions.
         with self.config.lock(session_id):
             if not self.config.session(session_id):
-                atomic_json(self.config.session_path(session_id), {"backend": backend})
+                atomic_json(self.config.session_path(session_id), {"backend": backend, "permissionMode": permission_mode})
 
     def selection(self, session_id: str | None = None) -> dict:
         saved = self.config.session(session_id) if session_id else {}
         settings = self.config.settings()
         backend = saved.get("backend") or settings["backend"]
         return {"backend": backend, "model": saved.get("model", settings["models"].get(backend, "")),
-                "reasoningEffort": saved.get("reasoningEffort", settings["reasoningEfforts"].get(backend, ""))}
+                "reasoningEffort": saved.get("reasoningEffort", settings["reasoningEfforts"].get(backend, "")),
+                "permissionMode": saved.get("permissionMode", "") if saved else settings["permissionModes"].get(backend, "")}
 
     def status(self) -> dict:
         settings = self.config.settings()
@@ -51,6 +53,7 @@ class AgentService:
             rows.append({"id": key, "name": label, "installed": installed,
                          "command": command, "model": settings["models"].get(key, ""),
                          "loginCommand": self.config.login_hint(key) if installed and key in FACTORIES else "",
+                         "permissionMode": settings["permissionModes"].get(key, ""),
                          "reasoningEffort": settings["reasoningEfforts"].get(key, "")})
         return {**settings, "backends": rows}
 
@@ -60,6 +63,7 @@ class AgentService:
         if backend == "openclaw":
             return {"backend": backend, "available": True, "models": [], "defaultModel": "",
                     "selectedModel": "", "reasoningOptions": [], "defaultReasoningEffort": "",
+                    "permissionOptions": [], "defaultPermissionMode": "",
                     "detail": "OpenClaw 使用网关中的模型与思考配置"}
         key = (backend, model)
         cached = self.catalogs.get(key)
@@ -73,6 +77,7 @@ class AgentService:
             except (AgentError, asyncio.TimeoutError) as exc:
                 result = {"backend": backend, "available": False, "models": [], "defaultModel": "",
                           "selectedModel": model, "reasoningOptions": [], "defaultReasoningEffort": "",
+                          "permissionOptions": [], "defaultPermissionMode": "",
                           "detail": str(exc) or "读取 CLI 模型列表超时"}
             finally:
                 await instance.close()
@@ -95,16 +100,19 @@ class AgentService:
         finally:
             await instance.close()
 
-    async def configure(self, backend, model="", effort="", *, make_default=False):
+    async def configure(self, backend, model="", effort="", *, make_default=False, permission_mode=None):
         previous = self.config.settings()
         changed = model != previous["models"].get(backend, "") or effort != previous["reasoningEfforts"].get(backend, "")
-        if changed and (model or effort):
+        permission_changed = permission_mode is not None and permission_mode != previous["permissionModes"].get(backend, "")
+        if (changed and (model or effort)) or (permission_changed and permission_mode):
             catalog = await self.discover(backend, model)
             if not catalog["available"]:
                 raise AgentError(catalog["detail"])
             select_model(catalog, model)
             select_effort(catalog, effort)
-        self.config.save(backend, model, effort, make_default=make_default)
+            if permission_mode:
+                select_permission(catalog, permission_mode)
+        self.config.save(backend, model, effort, make_default=make_default, permission_mode=permission_mode)
         return self.status()
 
     async def ask(self, session_id, items, emit):
@@ -154,8 +162,12 @@ class AgentService:
                 request.model = saved.get("model", settings["models"].get(backend, ""))
             if request.reasoning_effort is None:
                 request.reasoning_effort = saved.get("reasoningEffort", settings["reasoningEfforts"].get(backend, ""))
+            if request.permission_mode is None:
+                # Old conversations keep the standard mode, even if the new-chat default is elevated.
+                request.permission_mode = saved.get("permissionMode", "") if saved else settings["permissionModes"].get(backend, "")
             instance = FACTORIES[backend](self.config)
             saved.update(backend=backend, model=request.model, reasoningEffort=request.reasoning_effort,
+                         permissionMode=request.permission_mode,
                          state="running", updatedAt=time.time())
             atomic_json(self.config.session_path(request.session_id), saved)
 

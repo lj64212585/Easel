@@ -9,6 +9,8 @@ scenario = os.environ.get("EASEL_TEST_SCENARIO", "normal")
 native = "native-codex" if codex else "native-codebuddy"
 pending = None
 selected_model = "fake-fast"
+selected_mode = "default"
+PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions", "fullAccess", "delegate"]
 
 
 def model_rows():
@@ -24,7 +26,9 @@ def acp_config():
     levels = ["low", "medium"] if selected_model == "fake-fast" else ["high", "max"]
     if scenario == "boolean":
         return [{"id": "thinking", "category": "thought_level", "type": "boolean", "currentValue": False}]
-    return [{"id": "model", "category": "model", "type": "select", "currentValue": selected_model,
+    permissions = [{"id": "mode", "category": "mode", "type": "select", "currentValue": selected_mode,
+                    "options": [{"value": mode, "name": mode} for mode in PERMISSION_MODES]}] if scenario == "permission_config" else []
+    return permissions + [{"id": "model", "category": "model", "type": "select", "currentValue": selected_model,
              "options": [{"value": row["model"], "name": row["displayName"]} for row in model_rows()]},
             {"id": "thought", "category": "thought_level", "type": "select", "currentValue": levels[0],
              "options": [{"value": level, "name": level} for level in levels]}]
@@ -80,7 +84,13 @@ for line in sys.stdin:
             continue
         if method == "session/load":
             notification("session/update", {"sessionId": native, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "旧消息不可重复显示"}}})
-        result(rid, {"sessionId": native, "configOptions": acp_config()})
+        # Resume reports wider permissions to verify the client reapplies the chosen mode.
+        selected_mode = "fullAccess" if method == "session/load" else "default"
+        modes = {"availableModes": [{"id": mode, "name": mode} for mode in PERMISSION_MODES], "currentModeId": selected_mode}
+        result(rid, {"sessionId": native, "configOptions": acp_config(), "modes": modes})
+    elif method == "session/set_mode":
+        selected_mode = msg["params"]["modeId"]
+        result(rid, {})
     elif method == "session/set_model":
         selected_model = msg["params"]["modelId"]
         result(rid, {})
@@ -90,6 +100,8 @@ for line in sys.stdin:
             continue
         if msg["params"]["configId"] == "model":
             selected_model = msg["params"]["value"]
+        elif msg["params"]["configId"] == "mode":
+            selected_mode = msg["params"]["value"]
         result(rid, {"configOptions": acp_config()})
     elif method in ("turn/start", "session/prompt"):
         if codex:

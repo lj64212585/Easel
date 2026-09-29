@@ -6,6 +6,7 @@ from .base import AgentBackend, AgentError
 from .config import AgentConfig, context
 from .rpc import RpcProcess
 from .options import acp_catalog, select_model, select_effort
+from .permissions import select_permission
 
 
 class CodeBuddyBackend(AgentBackend):
@@ -71,6 +72,19 @@ class CodeBuddyBackend(AgentBackend):
         elif update.get("sessionUpdate") == "model_update":
             self.configuration["models"] = update.get("models", update)
 
+    async def _select_permissions(self, mode):
+        catalog = acp_catalog(self.configuration)
+        selected = select_permission(catalog, mode)
+        if not selected:
+            return  # Older CLIs without mode controls keep their existing behavior.
+        if catalog.get("permissionConfigId"):
+            result = await self.rpc.request("session/set_config_option", {
+                "sessionId": self.native_id, "configId": catalog["permissionConfigId"], "value": selected})
+        else:
+            result = await self.rpc.request("session/set_mode", {"sessionId": self.native_id, "modeId": selected})
+        if isinstance(result, dict):
+            self.configuration.update(result)
+
     async def _select_model(self, model):
         catalog = acp_catalog(self.configuration)
         selected = select_model(catalog, model)
@@ -113,6 +127,8 @@ class CodeBuddyBackend(AgentBackend):
             await self.rpc.request("session/set_config_option", {
                 "sessionId": self.native_id, "configId": catalog["reasoningConfigId"], "value": value,
                 **({"type": "boolean"} if isinstance(value, bool) else {})})
+        # Apply even the standard mode on resume: never retain a previous turn's broader permissions.
+        await self._select_permissions(request.permission_mode or "")
         # ACP has no standard system-prompt field. Include the authoritative
         # Easel context on each turn so resumed sessions pick up skill updates.
         prompt = context(self.config.root) + "\n\n# 当前用户消息\n" + request.message
