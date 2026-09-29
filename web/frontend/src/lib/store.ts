@@ -1,4 +1,4 @@
-import type { UploadedFile, ChatQuestion } from './api';
+import type { UploadedFile, ChatQuestion, AgentSelection } from './api';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -18,6 +18,8 @@ export interface ChatSession {
   sessionKey?: string;  // OpenClaw 的 session key，用于后端删除
   pendingTurnId?: string; // 进行中的可重连 job；浏览器重开后继续按 eventId 续流
   archived?: boolean;   // 归档：从 History 主列表移到「已归档」区
+  agentSelection?: AgentSelection;
+  draft?: { text: string; attachments: UploadedFile[] };
 }
 
 /** 进行中的流式状态（存于 App，不随页面切换/ChatPage 卸载而丢失）。 */
@@ -118,6 +120,8 @@ export function loadSessions(): ChatSession[] {
     // 防御：损坏/缺字段的会话（旧版写入或写中断）恢复成可用形态，绝不让渲染期崩。
     return sessions.map((session) => ({
       ...session,
+      // Existing conversations predate permission selection and retain the standard mode.
+      agentSelection: session.agentSelection ? { ...session.agentSelection, permissionMode: session.agentSelection.permissionMode ?? '' } : undefined,
       messages: Array.isArray(session.messages)
         ? session.messages.map((message) => {
             if (message?.role !== 'user' || message.agentContent || !message.content?.includes('【附件素材】')) {

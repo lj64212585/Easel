@@ -10,6 +10,7 @@ else:
 import hashlib
 import ipaddress
 import json
+import logging
 import re
 import shutil
 import socket
@@ -40,8 +41,13 @@ if str(PROJECT_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from easel.openclaw_cmd import openclaw_base_cmd
+from easel.agents import AgentError, AgentRequest, AgentService
+from easel.trend_sources import fetch_direct_trends, make_opener
 from easel.persona import load_profile_text, persona_prefix, chat_turn_message, profile_exists, _FILE_ORDER
 from easel.timeouts import TIMEOUT_CHAT, TIMEOUT_DIRECT, TIMEOUT_PRODUCE
+
+AGENTS = AgentService(PROJECT_ROOT)
+_LOCAL_AGENT_TASKS: dict[str, asyncio.Task] = {}
 try:
     from easel.gateway_questions import (
         GatewayClient, GatewayQuestionError, GatewayUnsupportedError,
@@ -420,6 +426,10 @@ AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 async def _lifespan(_app: FastAPI):
     """应用生命周期：关机时回收公众号扫码进程（替代已弃用的 on_event）。"""
     yield
+    for task in list(_LOCAL_AGENT_TASKS.values()):
+        task.cancel()
+    await asyncio.gather(*list(_LOCAL_AGENT_TASKS.values()), return_exceptions=True)
+    await AGENTS.close()
     _stop_mp_login_on_shutdown()
 
 
@@ -847,8 +857,28 @@ def _api_spec_status(skill: str, env: dict[str, str]) -> dict:
     }
 
 
-def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | None = None) -> str:
+def run_agent_sync(msg: str, timeout: int = TIMEOUT_DIRECT, session_id: str | None = None,
+                   backend: str | None = None, model: str | None = None, reasoning_effort: str | None = None,
+                   permission_mode: str | None = None) -> str:
     sk = session_id or f'web-{int(time.time() * 1000)}'
+    if (backend or _agent_backend_for(sk)) != "openclaw":
+        # Background profile/skill jobs run on their own event loop. Interactive
+        # permissions must be answered in streaming chat, never auto-approved.
+        service = AgentService(PROJECT_ROOT)
+        chunks = []
+        async def no_interaction(_items):
+            raise AgentError("此任务需要交互确认，请在对话页发送同一任务并回答许可卡片")
+        async def run():
+            try:
+                await service.run(AgentRequest(sk, msg, timeout, model, backend, reasoning_effort, permission_mode),
+                                  lambda kind, data: chunks.append(str(data)) if kind == "token" else None,
+                                  ask=no_interaction)
+                return "".join(chunks) or "（无输出）"
+            except AgentError as exc:
+                return f"❌ {exc}"
+            finally:
+                await service.close()
+        return asyncio.run(run())
     _heal_openclaw_session(sk)   # 清洗历史里无签名 thinking 块，防回放失效
     # 钉死 --session-id 让 OpenClaw 每轮续同一 transcript（防跨天空闲后新起空会话丢历史，见 _openclaw_session_id）
     cmd = openclaw_base_cmd() + ['--profile', OPENCLAW_PROFILE, 'agent', '--agent', 'main',
@@ -1028,7 +1058,59 @@ async def static_file(path: str):
 
 @app.get("/api/status")
 async def api_status():
-    return {"gateway": check_gateway(), "skills": get_skills(), "personas": list_personas()}
+    agent = AGENTS.status()
+    selected = next(row for row in agent["backends"] if row["id"] == agent["backend"])
+    gateway = await asyncio.to_thread(check_gateway) if agent["backend"] == "openclaw" else False
+    return {"gateway": gateway, "agent": agent,
+            "agentAvailable": gateway if agent["backend"] == "openclaw" else selected["installed"],
+            "skills": get_skills(), "personas": list_personas()}
+
+
+@app.get("/api/agent/settings")
+async def api_agent_settings():
+    return AGENTS.status()
+
+
+class AgentSettingsRequest(BaseModel):
+    backend: str
+    model: str = ""
+    reasoningEffort: str = ""
+    makeDefault: bool = True
+    permissionMode: str | None = None
+
+
+@app.post("/api/agent/settings")
+async def api_agent_settings_save(req: AgentSettingsRequest):
+    try:
+        return await AGENTS.configure(req.backend, req.model.strip(), req.reasoningEffort,
+                                      make_default=req.makeDefault, permission_mode=req.permissionMode)
+    except AgentError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/agent/options/{backend}")
+async def api_agent_options(backend: str, model: str = "", refresh: bool = False):
+    try:
+        return await AGENTS.discover(backend, model, refresh=refresh)
+    except AgentError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/agent/session/{session_id}")
+async def api_agent_selection(session_id: str):
+    _agent_backend_for(session_id)  # Migrate legacy sessions before reading.
+    return AGENTS.selection(session_id)
+
+
+@app.post("/api/agent/probe")
+async def api_agent_probe(req: AgentSettingsRequest):
+    if req.backend == "openclaw":
+        ready = await asyncio.to_thread(check_gateway)
+        return {"ready": ready, "authStatus": "unknown", "detail": "网关已连接" if ready else "网关未运行"}
+    try:
+        return await AGENTS.probe(req.backend)
+    except AgentError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/personas")
@@ -1724,6 +1806,10 @@ class ChatRequest(BaseModel):
     sessionId: str | None = None
     turnId: str | None = None
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    backend: str | None = None
+    model: str | None = None
+    reasoningEffort: str | None = None
+    permissionMode: str | None = None
 
 
 def _attachment_scope(session_id: str) -> str:
@@ -1995,6 +2081,103 @@ _RUNNING_CHAT: dict = {}
 _STOPPED_CHAT: set = set()
 
 
+def _agent_backend_for(session_id: str | None = None) -> str:
+    if session_id and not AGENTS.config.session(session_id):
+        # Old sessions predate native backend bindings. Preserve their engine
+        # even when the user changes the default for new conversations.
+        previous = _turn_file(f"web:{session_id}")
+        if previous.is_file():
+            old = json.loads(previous.read_text(encoding="utf-8"))
+            AGENTS.bind(session_id, old.get("backend", "openclaw"))
+    return AGENTS.backend_for(session_id)
+
+
+def _requested_agent(req: ChatRequest) -> str:
+    current = _agent_backend_for(req.sessionId)
+    if req.backend and req.backend not in ("openclaw", "codex", "codebuddy"):
+        raise HTTPException(400, "不支持的 Agent 后端")
+    saved = AGENTS.config.session(req.sessionId) if req.sessionId else {}
+    if req.backend and saved.get("backend") and req.backend != saved["backend"]:
+        raise HTTPException(409, "切换 Agent 请新建对话，原会话已保留")
+    backend = req.backend or current
+    if backend == "openclaw" and (req.model or req.reasoningEffort or req.permissionMode):
+        raise HTTPException(400, "OpenClaw 的模型、思考深度与权限请在网关配置中修改")
+    return backend
+
+
+async def _local_agent_stream(req):
+    message = _chat_message(req)
+    sk = req.sessionId or uuid.uuid4().hex
+    turn_id = req.turnId or uuid.uuid4().hex
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", turn_id):
+        raise HTTPException(400, "无效的 turnId")
+    path = _job_event_file(turn_id)
+    meta = path.with_suffix(".meta.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if meta.exists():
+        if json.loads(meta.read_text(encoding="utf-8")).get("sessionId") != sk:
+            raise HTTPException(409, "turnId 已用于另一会话")
+        return await api_chat_job_stream(turn_id)
+    if sk in _LOCAL_AGENT_TASKS:
+        raise HTTPException(409, "此会话上一轮仍在运行，请等待结束或停止")
+    backend = _requested_agent(req)
+    AGENTS.bind(sk, backend, permission_mode=req.permissionMode if req.permissionMode is not None
+                else AGENTS.config.settings()["permissionModes"].get(backend, ""))
+    try:
+        with meta.open("x", encoding="utf-8") as f:
+            json.dump({"sessionId": sk}, f)
+    except FileExistsError as exc:
+        raise HTTPException(409, "本轮已经提交，请恢复事件流") from exc
+    path.write_text("", encoding="utf-8")
+    seq = 0
+    chunks = []
+    finished = False
+
+    def emit(kind, data):
+        nonlocal seq
+        seq += 1
+        if kind == "token":
+            chunks.append(str(data))
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": seq, "event": kind, "data": data}, ensure_ascii=False) + "\n")
+
+    def finish(clean_end, reason):
+        nonlocal finished
+        if finished:
+            return
+        finished = True
+        _save_turn(f"web:{sk}", "done", "".join(chunks), {
+            "turn_id": turn_id, "backend": backend, "clean_end": clean_end, "stop_reason": reason})
+        emit("done", {"sessionKey": sk})
+        _LOCAL_AGENT_TASKS.pop(sk, None)
+
+    _save_turn(f"web:{sk}", "running", "", {"turn_id": turn_id, "backend": backend})
+    emit("activity", f"正在连接 {backend}…")
+
+    async def supervisor():
+        clean_end, reason = False, "error"
+        try:
+            await AGENTS.run(AgentRequest(sk, message, TIMEOUT_CHAT, req.model, backend, req.reasoningEffort, req.permissionMode), emit)
+            clean_end, reason = True, "completed"
+        except asyncio.CancelledError:
+            reason = "user_stopped"
+            emit("activity", "已停止，当前会话可以继续")
+        except Exception as exc:
+            emit("error", f"❌ {exc}")
+        finally:
+            finish(clean_end, reason)
+
+    task = asyncio.create_task(supervisor())
+    _LOCAL_AGENT_TASKS[sk] = task
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    # A task cancelled before its first instruction never enters its finally.
+    task.add_done_callback(lambda t: finish(False, "user_stopped" if t.cancelled() else "error"))
+    # Tail the durable log. Closing/reconnecting the HTTP stream cannot cancel
+    # the supervisor or resend the prompt to the agent.
+    return await api_chat_job_stream(turn_id)
+
+
 @app.get("/api/chat/last/{session_id}")
 async def api_chat_last(session_id: str, turn_id: str | None = None):
     """取某会话最近一轮的完整结果（SSE 断线后前端据此取回，避免丢结果）。"""
@@ -2035,6 +2218,14 @@ async def api_chat_job_stream(turn_id: str, after: int = 0):
                     if event["event"] in ("done", "error"):
                         return
             else:
+                meta = _job_event_file(turn_id).with_suffix(".meta.json")
+                if meta.is_file():
+                    sk = json.loads(meta.read_text(encoding="utf-8")).get("sessionId")
+                    if sk and sk not in _LOCAL_AGENT_TASKS:
+                        # Native job logs survive a Web restart. An orphaned
+                        # log is not a live run and must not heartbeat forever.
+                        yield {"event": "error", "data": json.dumps("服务已重启或任务已中断；原生会话已保留，请继续对话。", ensure_ascii=False)}
+                        return
                 # Keep proxy connections active; reconnecting remains safe if it still drops.
                 if time.monotonic() - idle_since >= 15:
                     yield {"event": "ping", "data": "{}"}
@@ -2058,6 +2249,10 @@ async def api_chat_stream(req: ChatRequest):
     记下该文件尾偏移、实时 tail 之后追加的行，用 runId 闩锁隔离本轮，把 assistant_text_stream 的
     token delta 转成 SSE `token`、thinking delta 转成 `thinking`。stdout 仅留作错误/兜底。
     """
+    if _requested_agent(req) != "openclaw":
+        return await _local_agent_stream(req)
+    if req.sessionId:
+        AGENTS.bind(req.sessionId, "openclaw")
     # 每轮末尾追加「先查技能库」提醒，抗长对话指令衰减（对用户不可见）
     message = _chat_message(req)
 
@@ -2646,6 +2841,12 @@ class QuestionAnswerRequest(BaseModel):
 @app.post("/api/chat/question/answer")
 async def api_question_answer(req: QuestionAnswerRequest):
     """前端点击 ask_user 选项后调用：转发 gateway question.resolve，让等待的 agent 拿到答案。"""
+    if req.questionId.startswith("agent_"):
+        try:
+            AGENTS.answer(req.questionId, req.answers)
+            return {"ok": True}
+        except AgentError as exc:
+            return {"ok": False, "error": str(exc)}
     if GatewayClient is None:
         return {"ok": False, "error": "gateway question bridge unavailable"}
     client = GatewayClient()
@@ -2666,13 +2867,19 @@ class QuestionStatusRequest(BaseModel):
 @app.post("/api/chat/question/status")
 async def api_question_status(req: QuestionStatusRequest):
     """批量查 question 状态（重放旧事件时过滤已解决的题）。"""
+    local = {qid: {"status": "pending" if qid in AGENTS.questions else "not_found"}
+             for qid in req.questionIds if qid.startswith("agent_")}
+    if len(local) == len(req.questionIds):
+        return {"ok": True, "questions": local}
     if GatewayClient is None:
         return {"ok": False, "questions": {}}
     client = GatewayClient()
     try:
         client.connect()
-        out = {}
+        out = dict(local)
         for qid in req.questionIds:
+            if qid in local:
+                continue
             try:
                 q = client.get_question(qid)
                 # QUESTION_NOT_FOUND 抛异常捕获后报 not_found；正常返回则按 status
@@ -2698,6 +2905,11 @@ async def api_chat_stop(req: StopRequest):
     """用户显式停止当前会话正在跑的对话 agent：终止进程 → supervisor 收尾释放会话锁 →
     下一句立刻能发（不再卡「上一条还在跑」）。仅此显式入口会杀进程；客户端断线不经此路径。"""
     sk = (req.sessionId or "").strip()
+    local_task = _LOCAL_AGENT_TASKS.get(sk)
+    if local_task:
+        local_task.cancel()
+        await asyncio.gather(local_task, return_exceptions=True)
+        return {"stopped": True}
     proc = _RUNNING_CHAT.get(sk) if sk else None
     if proc is not None and proc.poll() is None:
         _STOPPED_CHAT.add(sk)          # 标记为用户停止，供 supervisor 正常收尾（不报「被中断」）
@@ -2728,7 +2940,8 @@ async def api_chat(req: ChatRequest):
     message = _chat_message(req)
     loop = asyncio.get_event_loop()
     # chat 可能中途触发制作层长任务 → 用 TIMEOUT_CHAT，与流式 /api/chat/stream 一致（勿用 300s）
-    result = await loop.run_in_executor(None, run_agent_sync, message, TIMEOUT_CHAT, req.sessionId)
+    result = await loop.run_in_executor(None, run_agent_sync, message, TIMEOUT_CHAT, req.sessionId,
+                                       _requested_agent(req), req.model, req.reasoningEffort, req.permissionMode)
     return {"response": result}
 
 
@@ -2785,7 +2998,7 @@ async def api_media(path: str):
 
 # 系统数据目录/文件——不允许从内容库删除（删了会丢登录态/日历/发布记录）
 PROTECTED_OUTPUTS = {"_login", "_analytics", "_schedule.json", "_ideas.json",
-                     "_publish", "_publish.log", "_sessions", "_profile_build", "_debug", "_inbox"}
+                     "_publish", "_publish.log", "_agents", "_sessions", "_profile_build", "_debug", "_inbox"}
 UPLOAD_EXTS = IMAGE_EXTS | VIDEO_EXTS | {
     ".pdf", ".txt", ".md", ".markdown", ".csv", ".json", ".srt", ".vtt",
     ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".mp3", ".wav", ".m4a"}
@@ -3764,6 +3977,17 @@ def _write_baseline_profile(name: str, form: dict) -> None:
 @app.delete("/api/session/{session_key}")
 async def api_delete_session(session_key: str):
     """删除 OpenClaw 本地的 session 记录。"""
+    native = AGENTS.config.session(session_key)
+    if native and native.get("backend") != "openclaw":
+        if session_key in _LOCAL_AGENT_TASKS:
+            raise HTTPException(409, "请先停止此会话")
+        try:
+            with AGENTS.config.lock(session_key):
+                AGENTS.config.session_path(session_key).unlink(missing_ok=True)
+                _turn_file(f"web:{session_key}").unlink(missing_ok=True)
+        except AgentError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"deleted": True}
     sessions_file = Path.home() / '.openclaw-easel' / 'agents' / 'main' / 'sessions' / 'sessions.json'
     if not sessions_file.is_file():
         return {'deleted': False, 'reason': 'sessions file not found'}
@@ -3798,7 +4022,7 @@ _TREND_CACHE: dict[str, tuple[float, list]] = {}
 
 def _http_get_json(url: str, timeout: int = 8):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Easel"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with make_opener().open(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
@@ -3823,6 +4047,8 @@ def _parse_hot(obj: dict) -> list[dict]:
 
 
 def _fetch_platform(pf: str) -> list[dict]:
+    if pf not in TREND_SOURCES:
+        return []
     primary, backup = TREND_SOURCES.get(pf, (None, None))
     for url in (primary, backup):
         if not url:
@@ -3833,30 +4059,40 @@ def _fetch_platform(pf: str) -> list[dict]:
                 return items
         except Exception:
             continue
+    try:
+        items = fetch_direct_trends(pf)
+        if items:
+            return items
+        logging.getLogger(__name__).warning("热点 %s：平台直抓返回空数据", pf)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("热点 %s：平台直抓失败（%s）", pf, type(exc).__name__)
     return []
 
 
 @app.get("/api/trends")
 async def api_trends(platforms: str = "weibo,douyin,zhihu", limit: int = 12):
-    pfs = [p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES]
+    pfs = list(dict.fromkeys(p.strip() for p in platforms.split(",") if p.strip() in TREND_SOURCES))
     now = time.time()
     loop = asyncio.get_event_loop()
-    result = []
-    for pf in pfs:
+
+    async def load_platform(pf: str) -> dict:
         c = _TREND_CACHE.get(pf)
         if c and now - c[0] < 300:
             items = c[1]
         else:
             items = await loop.run_in_executor(None, _fetch_platform, pf)
             if items:
-                _TREND_CACHE[pf] = (now, items)
+                _TREND_CACHE[pf] = (time.time(), items)
             elif c:
                 items = c[1]
-        result.append({
+        return {
             "platform": pf,
             "label": TREND_LABELS.get(pf, pf),
             "items": items[:max(1, min(limit, 30))],
-        })
+        }
+
+    # 每个平台内部顺序回退，各平台并发，避免超时逐个平台累加。
+    result = await asyncio.gather(*(load_platform(pf) for pf in pfs))
     return {"trends": result, "updated": int(now)}
 
 

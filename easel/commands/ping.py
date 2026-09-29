@@ -48,6 +48,12 @@ def _step(label: str, cmd: list[str], timeout: int = 30,
 
 
 def cmd_ping(_args) -> int:
+    from pathlib import Path
+    from easel.agents import AgentService
+    from easel.agents.cli import run_once
+    root = Path(__file__).resolve().parents[2]
+    if AgentService(root).backend_for() != "openclaw":
+        return run_once(root, "仅回复 Easel Agent 已连接，不调用任何工具。", 90)
     print("[easel] 连通性测试\n")
     all_ok = True
 
